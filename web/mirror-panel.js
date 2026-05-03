@@ -664,27 +664,25 @@ function switchView(mode) {
             console.log(`${LOG} [PROBE] installed graph setter on ${window.__mirrorGraphProbes.length} SubgraphNode(s). ids: ${ids}`);
         } catch (e) { console.warn(`${LOG} probe install failed:`, e); }
 
-        // 全局 LGraph.remove 钩子：谁 remove SubgraphNode 都打堆栈
+        // 全局 LGraph.add 钩子：谁把 SubgraphNode 加进任何图都打堆栈
         try {
             const LG = (typeof LiteGraph !== "undefined" && LiteGraph?.LGraph) || window.LGraph;
             const proto = LG?.prototype;
-            if (proto && !proto.__mirrorRemovePatched) {
-                const origRemove = proto.remove;
-                proto.remove = function (n) {
+            if (proto && !proto.__mirrorAddPatched) {
+                const origAdd = proto.add;
+                proto.add = function (n, ...rest) {
                     if (n?.isSubgraphNode?.()) {
-                        const isRootNode = state.rootGraph?._nodes?.includes(n);
-                        const tag = isRootNode ? "ROOT-NODE" : "non-root";
-                        console.error(`${LOG} [PROBE-REMOVE] ${tag} SubgraphNode id=${n.id} being removed by graph (this).id=${this.id}, this===root?${this===state.rootGraph}, this===mirror?${this===state.mirrorGraph}. stack:`, new Error().stack);
+                        console.error(`${LOG} [PROBE-ADD] SubgraphNode id=${n.id} type=${n.type} added to graph id=${this?.id} name=${this?.constructor?.name}, root?${this===state.rootGraph}, mirror?${this===state.mirrorGraph}. stack:`, new Error().stack);
                     }
-                    return origRemove.apply(this, arguments);
+                    return origAdd.apply(this, [n, ...rest]);
                 };
-                proto.__mirrorRemovePatched = true;
+                proto.__mirrorAddPatched = true;
                 window.__mirrorRemoveRestore = () => {
-                    proto.remove = origRemove;
-                    delete proto.__mirrorRemovePatched;
+                    proto.add = origAdd;
+                    delete proto.__mirrorAddPatched;
                 };
             }
-        } catch (e) { console.warn(`${LOG} remove probe install failed:`, e); }
+        } catch (e) { console.warn(`${LOG} add probe install failed:`, e); }
 
         // 监控 rootGraph._nodes 数组变更 (push 和 splice)
         try {
