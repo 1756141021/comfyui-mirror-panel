@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 1.0.4
+
+修：第二次进 mirror 退出时报 root SubgraphNode `NullGraphError` —— 之前 1.0.3 只挡了构造侧（同实例 skip + abort listener），删除侧没动。
+
+`LGraph.remove(node)` 对 SubgraphNode 有一段特殊清理：扫 `[this.rootGraph, ...this.rootGraph.subgraphs.values()]` 里有没有其他 wrapper 引用同一个 subgraph，没找到就 `forEachNode(subgraph, onRemoved)` 然后 `rootGraph.subgraphs.delete(subgraph.id)` 把 subgraph 从 root map 里删掉。退出 mirror 时 `mirrorGraph.remove(clone)` 触发这条扫描，扫描会把 mirrorGraph（自己也是 root 的一个 subgraph）也算进去，命中"无其他 wrapper" 分支的概率不可控 —— 一旦命中，root 上原 wrapper 引用的 subgraph 状态被打没，下次 draw 抛 NullGraphError。
+
+修法：cleanup 时对 SubgraphNode clone 不走 `LGraph.remove`，手动从 mirror 的 `_nodes` / `_nodes_by_id` 摘掉再置 `graph=null`，绕开那段共享状态破坏逻辑。
+
 ## 1.0.3
 
 修：pin 多个 SubgraphNode 时会卡死（甚至触发 root 节点 NullGraphError）。

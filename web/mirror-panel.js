@@ -641,7 +641,25 @@ function exitMirrorCleanup({ doSetGraph }) {
                     }
                     try { n.properties = {}; } catch (_) {}
                     try { n.intpos = undefined; } catch (_) {}
-                    state.mirrorGraph.remove(n);
+                    // SubgraphNode clone 不走 LGraph.remove —— 它对 SubgraphNode 有
+                    // 特殊清理：[rootGraph, ...rootGraph.subgraphs.values()] 里如果找
+                    // 不到其他 wrapper 引用同一个 subgraph，就 forEachNode 调 onRemoved
+                    // 并 rootGraph.subgraphs.delete(subgraph.id) —— 在 mirrorGraph
+                    // 上下文里这条分支条件不可控（会扫到 mirrorGraph 自己的 subgraphs），
+                    // 一旦命中就把 root 上原 SubgraphNode 引用的 subgraph 状态打没，
+                    // root 画布下次 draw 那个 wrapper 立刻 NullGraphError。
+                    // 手动从 mirror 的 _nodes / _nodes_by_id 摘掉、置 graph=null 即可。
+                    if (n.isSubgraphNode?.()) {
+                        const arr = state.mirrorGraph._nodes;
+                        const idx = arr.indexOf(n);
+                        if (idx !== -1) arr.splice(idx, 1);
+                        if (state.mirrorGraph._nodes_by_id) {
+                            delete state.mirrorGraph._nodes_by_id[n.id];
+                        }
+                        try { n.graph = null; } catch (_) {}
+                    } else {
+                        state.mirrorGraph.remove(n);
+                    }
                 } catch (_) {}
             }
         } finally {
