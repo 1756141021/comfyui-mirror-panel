@@ -668,7 +668,7 @@ window.mirrorPerf = function (label = "probe", bucketMs = 500, nBuckets = 10) {
 function syncToggleButtonsLabel() {
     if (state.actionbarBtn) {
         state.actionbarBtn.dataset.view = state.view;
-        state.actionbarBtn.textContent = state.view === VIEW_MIRROR ? "✓ Mirror" : "🪞 Mirror";
+        renderMirrorButtonContent(state.actionbarBtn);
     }
     if (state.fallbackBtn) {
         state.fallbackBtn.dataset.view = state.view;
