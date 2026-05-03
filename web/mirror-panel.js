@@ -557,18 +557,41 @@ function exitMirrorCleanup({ doSetGraph }) {
     for (const r of state.reverseSyncRestorers) try { r(); } catch (_) {}
     state.reverseSyncRestorers = [];
 
-    // 显式 remove 每个 mirror clone 节点 → 触发 ComfyUI 的 DOM widget 卸载
-    // 否则自定义 DOM widget（词库面板、提示词编辑器等）会留在页面上盖住画布
-    // _suppressUnpin 标记让 mirror.onNodeRemoved 知道这是退出清理，不要清 pin map
+    // 关键：移除 mirror 节点必须在 canvas.graph === mirrorGraph 的上下文里做。
+    // 否则 ComfyUI 的 Vue watcher 看到"这节点不在当前图里"会跳过 DOM widget 清理，
+    // reactive watcher + DOM 元素留在页面上累积 → 工作流越来越卡。
+    // 外部退出（面包屑）时 canvas.graph 已经是 rootGraph 了，需要先临时切回 mirror。
     if (state.mirrorGraph?._nodes?.length) {
+        const needTempSwap = !doSetGraph && app.canvas.graph !== state.mirrorGraph;
+        if (needTempSwap) {
+            try { safeSetGraph(state.mirrorGraph); } catch (_) {}
+        }
         state._suppressUnpin = true;
         try {
             const nodesCopy = [...state.mirrorGraph._nodes];
             for (const n of nodesCopy) {
-                try { state.mirrorGraph.remove(n); } catch (_) {}
+                try {
+                    // 已知的第三方插件清理钩子（ComfyUI-Prompt-Assistant 等）
+                    try { window.imageCaption?.cleanup?.(n.id, true); } catch (_) {}
+                    try { window.promptAssistant?.cleanup?.(n.id, true); } catch (_) {}
+                    // 触发自定义 widget 的 onRemove
+                    if (Array.isArray(n.widgets)) {
+                        const widgets = [...n.widgets];
+                        for (const w of widgets) {
+                            try { w.onRemove?.(); } catch (_) {}
+                        }
+                        n.widgets.length = 0;
+                    }
+                    try { n.properties = {}; } catch (_) {}
+                    try { n.intpos = undefined; } catch (_) {}
+                    state.mirrorGraph.remove(n);
+                } catch (_) {}
             }
         } finally {
             state._suppressUnpin = false;
+        }
+        if (needTempSwap) {
+            try { safeSetGraph(state.rootGraph); } catch (_) {}
         }
     }
 
@@ -580,15 +603,39 @@ function exitMirrorCleanup({ doSetGraph }) {
     const savedDs = state._savedDs;
     state._savedDs = null;
     if (savedDs && doSetGraph) {
-        const restore = () => {
+        // ComfyUI 的 ds.min_scale 默认 0.1，但用户用滚轮可以缩到 0.1 以下
+        // 我们在 enter Mirror 时若保存了 scale < 0.1，restore 时会被 changeScale 钳到 0.1
+        // → 临时把 min_scale 拉低，还原结束后恢复
+        const restore = (attempt = 0) => {
             if (!app.canvas.ds) return;
-            app.canvas.ds.offset[0] = savedDs.offset[0];
-            app.canvas.ds.offset[1] = savedDs.offset[1];
-            try { app.canvas.ds.offset = [savedDs.offset[0], savedDs.offset[1]]; } catch (_) {}
-            app.canvas.ds.scale = savedDs.scale;
+            const ds = app.canvas.ds;
+            const origMin = ds.min_scale;
+            try {
+                if (savedDs.scale < (origMin ?? 0.1)) {
+                    ds.min_scale = Math.min(savedDs.scale * 0.5, 0.001);
+                }
+                ds.scale = savedDs.scale;
+                ds.offset[0] = savedDs.offset[0];
+                ds.offset[1] = savedDs.offset[1];
+                try { ds.offset = [savedDs.offset[0], savedDs.offset[1]]; } catch (_) {}
+            } finally {
+                // 等 1 帧再恢复 min_scale，避免本帧 watcher 立刻把 scale clamp 回去
+                requestAnimationFrame(() => {
+                    if (ds.min_scale !== origMin) ds.min_scale = origMin ?? 0.1;
+                });
+            }
             app.canvas.setDirty?.(true, true);
+
+            const ok = Math.abs(ds.scale - savedDs.scale) < 1e-6
+                && Math.abs(ds.offset[0] - savedDs.offset[0]) < 0.5
+                && Math.abs(ds.offset[1] - savedDs.offset[1]) < 0.5;
+            if (!ok && attempt < 5) {
+                requestAnimationFrame(() => restore(attempt + 1));
+            } else if (!ok) {
+                console.warn(`${LOG} ds restore failed after retries: target scale=${savedDs.scale}, actual=${ds.scale}`);
+            }
         };
-        requestAnimationFrame(() => requestAnimationFrame(restore));
+        requestAnimationFrame(() => restore(0));
     }
     purgeMirrorSubgraphsFrom(state.rootGraph);
     state.mirrorSubgraphId = null;
