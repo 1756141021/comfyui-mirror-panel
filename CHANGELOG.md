@@ -2,11 +2,15 @@
 
 ## 1.0.1
 
-修：DOM widget 在 mirror 内改值同步不到 canvas（典型表现：Lora Manager 的 toggle 在 mirror 里关掉一个 lora，按 Run 后所有 lora 又被勾上）。
+修：DOM widget 双向同步。
 
-根因：ComfyUI 的 `addDOMWidget` 在 widget 实例上装的 `value` 是 `configurable: false` 的存取器，原本依赖 `Object.defineProperty(mw, "value")` 接管的代理装不上。这类 widget 的内部状态都走 `widget.value = X → options.setValue(X) → 写到自己的闭包`，到不了 root 节点。
+之前症状：
+- mirror→canvas 单向不通：mirror 内的 toggle/输入只更新 mirror 自己的闭包，按 Run 用的是 root 上的旧值。
+- canvas→mirror 单向也不通：Lora Manager 的"发送到节点"或者外部修改 root 节点的 widget 值，mirror 看不到。
 
-修法：mw clone 时再包一层 `mw.options.setValue`，原 setValue 跑完后用同一个值再调一遍 `ow.options.setValue`，让 root 闭包同步更新。callback wrap 路径不变。
+根因：ComfyUI 的 `addDOMWidget` 在 widget 实例上装的 `value` 是 `configurable: false` 的存取器，原本想接管的 `Object.defineProperty(mw, "value")` 装不上。所有 DOM widget 的写都走 `widget.value = X → options.setValue(X) → 写到自己的闭包`，对面节点完全感知不到。
+
+修法：clone 时双向包 `options.setValue`。`mw.options.setValue` 包一层先调原 setValue 再写 ow；`ow.options.setValue` 同样包一层先调原 setValue 再写 mw。两个包装都引用对方的"原始" setValue，没有循环。退出 mirror 时还原 ow 那一层。
 
 ## 1.0.0
 

@@ -321,18 +321,31 @@ function cloneNodeIntoMirror(origNode, mirrorGraph, layout) {
 
         // DOM widget 兜底：addDOMWidget 给 widget.value 装的是 configurable:false 的存取器，
         // 上面的 defineProperty 装不上。这类 widget 的内部 toggle/输入都走
-        // widget.value = X → options.setValue(X) → 写到自己的闭包，根本不到 ow。
-        // 包一层 mw.options.setValue：先调原 setValue 维持 mirror 自身渲染，
-        // 再把同一个值灌给 ow.options.setValue，让 root 闭包同步更新。
+        // widget.value = X → options.setValue(X) → 写到自己的闭包，根本不到对面。
+        // 双向包 setValue：mirror→root 让 mirror 内的修改回写 root；
+        // root→mirror 让 root 节点 (例如 Lora Manager 的"发送到节点") 更新到 mirror。
+        // 两个包装都只调对方的"原始"setValue（不进对方的 wrap），不会形成 setValue 循环。
         if (mw.options && typeof mw.options.setValue === "function" &&
             ow.options && typeof ow.options.setValue === "function") {
             const mwOrigSetValue = mw.options.setValue;
-            const owSetValue = ow.options.setValue;
+            const owOrigSetValue = ow.options.setValue;
             mw.options.setValue = function (v) {
                 const r = mwOrigSetValue.call(this, v);
-                try { owSetValue.call(ow.options, v); } catch (_) {}
+                try { owOrigSetValue.call(ow.options, v); } catch (_) {}
                 return r;
             };
+            ow.__mirrorOrigSetValue = owOrigSetValue;
+            ow.options.setValue = function (v) {
+                const r = owOrigSetValue.call(this, v);
+                try { mwOrigSetValue.call(mw.options, v); } catch (_) {}
+                return r;
+            };
+            state.reverseSyncRestorers.push(() => {
+                if (ow.__mirrorOrigSetValue && ow.options) {
+                    ow.options.setValue = ow.__mirrorOrigSetValue;
+                    delete ow.__mirrorOrigSetValue;
+                }
+            });
         }
 
         // mirror widget callback 包一层：除了原 callback 行为，再触发 root callback
