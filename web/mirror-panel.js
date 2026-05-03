@@ -799,10 +799,13 @@ function exitMirrorCleanup({ doSetGraph }) {
                         const arr = state.mirrorGraph._nodes;
                         const idx = arr.indexOf(n);
                         if (idx !== -1) arr.splice(idx, 1);
+                        else console.warn(`${LOG} [PROBE-CLEANUP] SubgraphNode id=${n.id} NOT FOUND in mirror._nodes! arr.length=${arr.length}`);
                         if (state.mirrorGraph._nodes_by_id) {
                             delete state.mirrorGraph._nodes_by_id[n.id];
                         }
-                        try { n.graph = null; } catch (_) {}
+                        const before = n.graph;
+                        try { n.graph = null; } catch (e) { console.error(`${LOG} [PROBE-CLEANUP] set graph=null threw for id=${n.id}`, e); }
+                        console.log(`${LOG} [PROBE-CLEANUP] SubgraphNode id=${n.id} cleaned, graph was ${before?.id} now ${n.graph}`);
                     } else {
                         state.mirrorGraph.remove(n);
                     }
@@ -815,6 +818,19 @@ function exitMirrorCleanup({ doSetGraph }) {
             try { safeSetGraph(state.rootGraph); } catch (_) {}
         }
     }
+
+    // 诊断：setGraph 前打 root._nodes 里有没有 SubgraphNode 且 graph=null
+    try {
+        const snap = state.rootGraph?._nodes;
+        if (snap) {
+            const bad = snap.filter(n => n?.isSubgraphNode?.() && !n.graph);
+            if (bad.length > 0) {
+                console.error(`${LOG} [PROBE-PRE-SETGRAPH] ${bad.length} root SubgraphNode(s) already have graph=null before setGraph:`, bad.map(n=>n.id));
+            } else {
+                console.log(`${LOG} [PROBE-PRE-SETGRAPH] all root SubgraphNodes have graph, total root._nodes=${snap.length}`);
+            }
+        }
+    } catch (_) {}
 
     if (doSetGraph) {
         try { safeSetGraph(state.rootGraph); }
