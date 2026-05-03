@@ -574,9 +574,9 @@ function switchView(mode) {
         }
 
         // ===== 调试探针 =====
-        // 在 enter mirror 之前给 root 上每个 SubgraphNode 的 `graph` 属性套 setter，
-        // 谁在 mirror session 期间把它置 null/undefined 就 console.error 打堆栈。
-        // 退出时还原。
+        // 1) root SubgraphNode 的 graph setter（看 .graph = null 路径）
+        // 2) LGraph.prototype.remove 全局钩子（看谁 remove 了 root 上的 SubgraphNode）
+        // 3) rootGraph._nodes splice 钩子（看谁动了 root._nodes 数组）
         try {
             window.__mirrorGraphProbes = window.__mirrorGraphProbes || [];
             for (const n of state.rootGraph._nodes || []) {
@@ -590,7 +590,7 @@ function switchView(mode) {
                     get() { return val; },
                     set(v) {
                         if (!v && val) {
-                            console.error(`${LOG} [PROBE] root SubgraphNode ${id} .graph nulled. stack:`, new Error().stack);
+                            console.error(`${LOG} [PROBE-SET] root SubgraphNode ${id} .graph nulled. stack:`, new Error().stack);
                         }
                         val = v;
                     },
@@ -604,6 +604,53 @@ function switchView(mode) {
             }
             console.log(`${LOG} [PROBE] installed graph setter on ${window.__mirrorGraphProbes.length} root SubgraphNode(s)`);
         } catch (e) { console.warn(`${LOG} probe install failed:`, e); }
+
+        // 全局 LGraph.remove 钩子：谁 remove SubgraphNode 都打堆栈
+        try {
+            const LG = (typeof LiteGraph !== "undefined" && LiteGraph?.LGraph) || window.LGraph;
+            const proto = LG?.prototype;
+            if (proto && !proto.__mirrorRemovePatched) {
+                const origRemove = proto.remove;
+                proto.remove = function (n) {
+                    if (n?.isSubgraphNode?.()) {
+                        const isRootNode = state.rootGraph?._nodes?.includes(n);
+                        const tag = isRootNode ? "ROOT-NODE" : "non-root";
+                        console.error(`${LOG} [PROBE-REMOVE] ${tag} SubgraphNode id=${n.id} being removed by graph (this).id=${this.id}, this===root?${this===state.rootGraph}, this===mirror?${this===state.mirrorGraph}. stack:`, new Error().stack);
+                    }
+                    return origRemove.apply(this, arguments);
+                };
+                proto.__mirrorRemovePatched = true;
+                window.__mirrorRemoveRestore = () => {
+                    proto.remove = origRemove;
+                    delete proto.__mirrorRemovePatched;
+                };
+            }
+        } catch (e) { console.warn(`${LOG} remove probe install failed:`, e); }
+
+        // 监控 rootGraph._nodes 数组变更
+        try {
+            const arr = state.rootGraph?._nodes;
+            if (arr && !arr.__mirrorSplicePatched) {
+                const origSplice = arr.splice;
+                arr.splice = function () {
+                    if (arguments.length > 1 && arguments[1] > 0) {
+                        const removed = origSplice.apply(this, arguments);
+                        for (const r of removed) {
+                            if (r?.isSubgraphNode?.()) {
+                                console.error(`${LOG} [PROBE-SPLICE] root._nodes spliced out SubgraphNode id=${r.id}. stack:`, new Error().stack);
+                            }
+                        }
+                        return removed;
+                    }
+                    return origSplice.apply(this, arguments);
+                };
+                arr.__mirrorSplicePatched = true;
+                window.__mirrorSpliceRestore = () => {
+                    arr.splice = origSplice;
+                    delete arr.__mirrorSplicePatched;
+                };
+            }
+        } catch (e) { console.warn(`${LOG} splice probe install failed:`, e); }
 
         const built = buildMirrorGraph();
         if (!built || !built.mirror) {
@@ -758,6 +805,8 @@ function exitMirrorCleanup({ doSetGraph }) {
         }
         if (nulled > 0) console.error(`${LOG} [PROBE] ${nulled} root SubgraphNode(s) had graph=null at exit (see earlier stacks)`);
         window.__mirrorGraphProbes = [];
+        try { window.__mirrorRemoveRestore?.(); window.__mirrorRemoveRestore = null; } catch (_) {}
+        try { window.__mirrorSpliceRestore?.(); window.__mirrorSpliceRestore = null; } catch (_) {}
     } catch (e) { console.warn(`${LOG} probe teardown failed:`, e); }
 
     state.mirrorSubgraphId = null;
