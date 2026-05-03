@@ -835,6 +835,13 @@ function exitMirrorCleanup({ doSetGraph }) {
     if (doSetGraph) {
         try { safeSetGraph(state.rootGraph); }
         catch (e) { console.error(`${LOG} setGraph(root) failed:`, e); return; }
+        // POST-SETGRAPH 检查
+        try {
+            const r = state.rootGraph?._nodes;
+            const bad = r?.filter(n => n?.isSubgraphNode?.() && !n.graph);
+            if (bad?.length) console.error(`${LOG} [PROBE-POST-SETGRAPH] ${bad.length} SubgraphNode(s) with graph=null AFTER setGraph:`, bad.map(n=>n.id));
+            else console.log(`${LOG} [PROBE-POST-SETGRAPH] all ok, total=${r?.length}`);
+        } catch(_) {}
     }
 
     const savedDs = state._savedDs;
@@ -875,6 +882,13 @@ function exitMirrorCleanup({ doSetGraph }) {
         requestAnimationFrame(() => restore(0));
     }
     purgeMirrorSubgraphsFrom(state.rootGraph);
+    // POST-PURGE 检查
+    try {
+        const r = state.rootGraph?._nodes;
+        const bad = r?.filter(n => n?.isSubgraphNode?.() && !n.graph);
+        if (bad?.length) console.error(`${LOG} [PROBE-POST-PURGE] ${bad.length} SubgraphNode(s) with graph=null AFTER purge:`, bad.map(n=>n.id));
+        else console.log(`${LOG} [PROBE-POST-PURGE] all ok, total=${r?.length}`);
+    } catch(_) {}
 
     // 卸探针并报告结果
     try {
