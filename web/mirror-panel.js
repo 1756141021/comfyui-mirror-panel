@@ -573,6 +573,38 @@ function switchView(mode) {
             };
         }
 
+        // ===== 调试探针 =====
+        // 在 enter mirror 之前给 root 上每个 SubgraphNode 的 `graph` 属性套 setter，
+        // 谁在 mirror session 期间把它置 null/undefined 就 console.error 打堆栈。
+        // 退出时还原。
+        try {
+            window.__mirrorGraphProbes = window.__mirrorGraphProbes || [];
+            for (const n of state.rootGraph._nodes || []) {
+                if (!n?.isSubgraphNode?.()) continue;
+                if (n.__mirrorGraphProbed) continue;
+                const id = n.id;
+                let val = n.graph;
+                Object.defineProperty(n, "graph", {
+                    configurable: true,
+                    enumerable: true,
+                    get() { return val; },
+                    set(v) {
+                        if (!v && val) {
+                            console.error(`${LOG} [PROBE] root SubgraphNode ${id} .graph nulled. stack:`, new Error().stack);
+                        }
+                        val = v;
+                    },
+                });
+                n.__mirrorGraphProbed = true;
+                window.__mirrorGraphProbes.push({ node: n, restore: () => {
+                    delete n.graph;
+                    n.graph = val;
+                    delete n.__mirrorGraphProbed;
+                }});
+            }
+            console.log(`${LOG} [PROBE] installed graph setter on ${window.__mirrorGraphProbes.length} root SubgraphNode(s)`);
+        } catch (e) { console.warn(`${LOG} probe install failed:`, e); }
+
         const built = buildMirrorGraph();
         if (!built || !built.mirror) {
             console.error(`${LOG} buildMirrorGraph failed`);
@@ -713,6 +745,21 @@ function exitMirrorCleanup({ doSetGraph }) {
         requestAnimationFrame(() => restore(0));
     }
     purgeMirrorSubgraphsFrom(state.rootGraph);
+
+    // 卸探针并报告结果
+    try {
+        const probes = window.__mirrorGraphProbes || [];
+        let nulled = 0;
+        for (const p of probes) {
+            try {
+                if (p.node && !p.node.graph) nulled++;
+                p.restore?.();
+            } catch (_) {}
+        }
+        if (nulled > 0) console.error(`${LOG} [PROBE] ${nulled} root SubgraphNode(s) had graph=null at exit (see earlier stacks)`);
+        window.__mirrorGraphProbes = [];
+    } catch (e) { console.warn(`${LOG} probe teardown failed:`, e); }
+
     state.mirrorSubgraphId = null;
     state.mirrorGraph = null;
     state.nodeIdMap = null;
