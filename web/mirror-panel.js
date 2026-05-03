@@ -686,11 +686,20 @@ function switchView(mode) {
             }
         } catch (e) { console.warn(`${LOG} remove probe install failed:`, e); }
 
-        // 监控 rootGraph._nodes 数组变更
+        // 监控 rootGraph._nodes 数组变更 (push 和 splice)
         try {
             const arr = state.rootGraph?._nodes;
-            if (arr && !arr.__mirrorSplicePatched) {
+            if (arr && !arr.__mirrorArrayPatched) {
+                const origPush = arr.push;
                 const origSplice = arr.splice;
+                arr.push = function (...nodes) {
+                    for (const n of nodes) {
+                        if (n?.isSubgraphNode?.()) {
+                            console.error(`${LOG} [PROBE-PUSH] root._nodes.push(SubgraphNode id=${n.id} type=${n.type}). stack:`, new Error().stack);
+                        }
+                    }
+                    return origPush.apply(this, nodes);
+                };
                 arr.splice = function () {
                     if (arguments.length > 1 && arguments[1] > 0) {
                         const removed = origSplice.apply(this, arguments);
@@ -703,13 +712,14 @@ function switchView(mode) {
                     }
                     return origSplice.apply(this, arguments);
                 };
-                arr.__mirrorSplicePatched = true;
+                arr.__mirrorArrayPatched = true;
                 window.__mirrorSpliceRestore = () => {
+                    arr.push = origPush;
                     arr.splice = origSplice;
-                    delete arr.__mirrorSplicePatched;
+                    delete arr.__mirrorArrayPatched;
                 };
             }
-        } catch (e) { console.warn(`${LOG} splice probe install failed:`, e); }
+        } catch (e) { console.warn(`${LOG} array probe install failed:`, e); }
 
         const built = buildMirrorGraph();
         if (!built || !built.mirror) {
