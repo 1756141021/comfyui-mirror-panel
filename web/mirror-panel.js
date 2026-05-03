@@ -433,6 +433,14 @@ function buildMirrorGraph() {
         if (origOnNodeRemoved) return origOnNodeRemoved.apply(this, arguments);
     };
 
+    // 共享 rootGraph._groups：DOM widget（如组管理器）在 mirror 视图里
+    // 读 app.graph._groups 来构建颜色下拉列表。mirrorGraph 本身没有 groups，
+    // 导致 'Purple' 等选项不出现，保存的颜色过滤器无法还原。
+    // 共享引用后 widget 能正确看到工作流的组颜色，filter 值可以正常回显。
+    if (Array.isArray(state.rootGraph._groups)) {
+        mirror._groups = state.rootGraph._groups;
+    }
+
     const map = getPinnedMap();
     const idMap = {};
     let success = 0, fail = 0;
