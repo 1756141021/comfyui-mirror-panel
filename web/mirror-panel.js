@@ -1,0 +1,938 @@
+// ComfyUI Mirror Panel — v0.4.0
+// 架构：clone-based mirror graph。rootGraph 完全不动。
+//
+//   - Pin 节点：graph.extra.mirrorPanel.pinned[node.id] = { x, y, title }
+//   - 进 Mirror：rootGraph.createSubgraph(...) 拿一个 Subgraph 实例（仅在 _subgraphs map 留条目，
+//                不在 rootGraph._nodes 加 wrapper 节点 → 工作流结构零变动）
+//                把 pinned 节点 serialize/createNode/configure 克隆进 mirrorGraph
+//                canvas.setGraph(mirrorGraph)
+//   - 退 Mirror：先 sync mirror→root（用户在 mirror 里改的值同步回 root），
+//                再 canvas.setGraph(rootGraph)，再删除临时 subgraph 条目，
+//                还原 root widget callback 钩子
+//   - 执行：不 hook queuePrompt。queuePrompt → graphToPrompt(this.rootGraph)，
+//           原生递归走 root，seed randomize / control_after_generate 在 root 上的原节点上发生
+//   - Mirror 视图下点 Queue：执行结束 api.execution_success 触发 → 拉 root 值回 mirror 显示
+//   - 双向 widget 同步：mirror.widget.callback 包一层 → 写到 root；
+//                       root.widget.callback 包一层（仅 mirror 在场期间）→ 写到 mirror
+//
+// 不做：graph swap、cover div、queuePrompt hook、graphToPrompt hook。
+
+import { app } from "/scripts/app.js";
+import { api } from "/scripts/api.js";
+
+const LOG = "[MirrorPanel]";
+const VIEW_CANVAS = "canvas";
+const VIEW_MIRROR = "mirror";
+const SUBGRAPH_NAME = "Mirror Panel";
+
+const state = {
+    view: VIEW_CANVAS,
+    actionbarBtn: null,
+    fallbackBtn: null,
+    actionbarObserver: null,
+    rootGraph: null,
+    mirrorGraph: null,
+    mirrorSubgraphId: null,        // 临时 subgraph 在 root._subgraphs 的 key，退出时清理
+    nodeIdMap: null,                // origId → mirrorNodeId
+    reverseSyncRestorers: [],       // 退出时还原 root widget callback
+    apiListenerInstalled: false,
+};
+
+// ---------- 工具 ----------
+
+function valueEqual(a, b) {
+    if (Object.is(a, b)) return true;
+    const ta = typeof a, tb = typeof b;
+    if (ta !== tb) return false;
+    if (a === null || b === null) return false;
+    if (ta !== "object") return false;
+    try { return JSON.stringify(a) === JSON.stringify(b); }
+    catch (_) { return false; }
+}
+
+function getRootGraph() {
+    return state.rootGraph || app.canvas?.graph?.rootGraph || app.canvas?.graph || app.graph;
+}
+
+function getPinnedMap() {
+    const g = getRootGraph();
+    if (!g) return {};
+    if (typeof g.extra !== "object" || g.extra === null) g.extra = {};
+    if (!g.extra.mirrorPanel) g.extra.mirrorPanel = { version: 1, pinned: {} };
+    if (!g.extra.mirrorPanel.pinned) g.extra.mirrorPanel.pinned = {};
+    return g.extra.mirrorPanel.pinned;
+}
+
+function isPinned(node) {
+    return !!getPinnedMap()[node.id];
+}
+
+function pinNode(node) {
+    const map = getPinnedMap();
+    map[node.id] = {
+        x: 100 + (Object.keys(map).length % 4) * 320,
+        y: 100 + Math.floor(Object.keys(map).length / 4) * 220,
+        title: node.title || "",
+    };
+    console.log(`${LOG} pin id=${node.id} title="${node.title}" total=${Object.keys(map).length}`);
+}
+
+function unpinNode(node) {
+    const map = getPinnedMap();
+    delete map[node.id];
+    console.log(`${LOG} unpin id=${node.id} total=${Object.keys(map).length}`);
+}
+
+// ---------- 兼容性 ----------
+
+function detectEnv() {
+    return {
+        hasApp: !!app,
+        hasGraph: !!app?.graph,
+        hasCanvas: !!app?.canvas,
+        hasSetGraph: typeof app?.canvas?.setGraph === "function",
+        hasCreateSubgraph: typeof app?.graph?.createSubgraph === "function",
+        frontendVersion: window.__COMFYUI_FRONTEND_VERSION__ ?? "unknown",
+    };
+}
+
+// ---------- 样式 ----------
+
+function injectStyles() {
+    if (document.getElementById("mirror-panel-styles")) return;
+    const style = document.createElement("style");
+    style.id = "mirror-panel-styles";
+    style.textContent = `
+.mirror-toggle-btn {
+    cursor: pointer; padding: 4px 10px;
+    border: 1px solid #555; background: #2a2a2a;
+    color: #ddd; border-radius: 4px;
+    font-size: 12px; line-height: 1.4; white-space: nowrap;
+}
+.mirror-toggle-btn:hover { background: #3a3a3a; }
+.mirror-toggle-btn[data-view="mirror"] {
+    background: #4a6cf7; border-color: #5a7cff; color: #fff;
+}
+.mirror-actionbar-btn {
+    cursor: pointer; border: none; outline: none;
+    background: transparent;
+    color: var(--p-button-text-secondary-color, #d4d4d4);
+    padding: 0 12px; height: 32px; border-radius: 6px;
+    font-size: 13px; font-weight: 500;
+    display: inline-flex; align-items: center;
+    gap: 6px; white-space: nowrap;
+    transition: background 120ms ease, color 120ms ease;
+}
+.mirror-actionbar-btn:hover {
+    background: var(--p-button-text-secondary-hover-background, rgba(255,255,255,0.08));
+    color: #fff;
+}
+.mirror-actionbar-btn[data-view="mirror"] {
+    background: linear-gradient(135deg, #5b7cff 0%, #4a6cf7 100%);
+    color: #fff;
+    box-shadow: 0 1px 3px rgba(74, 108, 247, 0.4);
+}
+.mirror-actionbar-btn[data-view="mirror"]:hover {
+    background: linear-gradient(135deg, #6b8cff 0%, #5a7cff 100%);
+    color: #fff;
+}
+.mirror-actionbar-btn svg {
+    width: 14px; height: 14px;
+    flex-shrink: 0;
+}
+/* ComfyUI 的 DomWidget 包装层 bug：内层 textarea/input 被 display:none 后，
+   外层 .dom-widget 容器仍然 pointer-events:auto 抢事件（在自定义节点
+   "Lora触发词管理"等点过按钮后触发），盖住下半个画布让节点选不中。
+   规则：dom-widget 内含隐藏的 textarea/input 就把容器 pointer-events 关掉。 */
+.dom-widget:has(> textarea[style*="display: none"]) {
+    pointer-events: none !important;
+}
+.dom-widget:has(> input[style*="display: none"]) {
+    pointer-events: none !important;
+}
+`;
+    document.head.appendChild(style);
+}
+
+// ---------- 构建 mirrorGraph ----------
+
+function getLGraphCtor() {
+    return (typeof LiteGraph !== "undefined" && LiteGraph?.LGraph) || window.LGraph;
+}
+
+// 用 createSubgraph 拿一个 Subgraph 实例（不创建 wrapper 节点，仅 _subgraphs map 加条目）
+// 退出时按 id/name 清理。这样 ComfyUI 内部认为我们在 subgraph 里，享受 subgraph 优化路径。
+function createMirrorSubgraphInstance() {
+    const root = state.rootGraph;
+    if (!root || typeof root.createSubgraph !== "function") {
+        console.warn(`${LOG} rootGraph.createSubgraph not available`);
+        return null;
+    }
+    const id = `mirror-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    try {
+        const sg = root.createSubgraph({
+            id,
+            name: SUBGRAPH_NAME,
+            inputs: [], outputs: [], nodes: [], links: [],
+            inputNode:  { id: `${id}-in`,  bounding: [-200, 0, 100, 200] },
+            outputNode: { id: `${id}-out`, bounding: [ 800, 0, 100, 200] },
+        });
+        if (sg) {
+            state.mirrorSubgraphId = sg.id;
+            console.log(`${LOG} mirror subgraph instance created id=${sg.id}`);
+            return sg;
+        }
+    } catch (e) {
+        console.warn(`${LOG} createSubgraph failed:`, e?.message || e);
+    }
+    return null;
+}
+
+function purgeMirrorSubgraphsFrom(graph) {
+    if (!graph?.subgraphs) return 0;
+    let cleaned = 0;
+    try {
+        const keys = graph.subgraphs.keys ? [...graph.subgraphs.keys()] : Object.keys(graph.subgraphs);
+        for (const k of keys) {
+            const sg = graph.subgraphs.get ? graph.subgraphs.get(k) : graph.subgraphs[k];
+            if (sg?.name === SUBGRAPH_NAME || (typeof k === "string" && k.startsWith("mirror-"))) {
+                if (graph.subgraphs.delete) graph.subgraphs.delete(k);
+                else delete graph.subgraphs[k];
+                cleaned++;
+            }
+        }
+    } catch (e) {
+        console.warn(`${LOG} purge failed:`, e);
+    }
+    return cleaned;
+}
+
+function sweepStaleMirrorSubgraphs(reason) {
+    const root = app.canvas?.graph?.rootGraph || app.canvas?.graph || app.graph;
+    if (!root) return;
+    const n = purgeMirrorSubgraphsFrom(root);
+    if (n > 0) console.log(`${LOG} sweep (${reason}): cleaned ${n} stale mirror subgraphs`);
+}
+
+function pruneDeadPins(reason) {
+    const root = app.canvas?.graph?.rootGraph || app.canvas?.graph || app.graph;
+    if (!root) return;
+    const pinned = root.extra?.mirrorPanel?.pinned;
+    if (!pinned) return;
+    let cleaned = 0;
+    for (const id of Object.keys(pinned)) {
+        const numId = Number(id);
+        if (!root.getNodeById(isNaN(numId) ? id : numId)) {
+            delete pinned[id];
+            cleaned++;
+        }
+    }
+    if (cleaned > 0) console.log(`${LOG} prune (${reason}): cleaned ${cleaned} dead pins`);
+}
+
+// 把一个 root 节点 clone 进 mirrorGraph
+function cloneNodeIntoMirror(origNode, mirrorGraph, layout) {
+    // SubgraphNode 拒绝克隆：它们和包装的 subgraph 实例有复杂的 host 关系
+    // 共享会让 mirror.remove 反向破坏原节点的 graph 引用（NullGraphError）
+    // pin 一个 subgraph 包装节点也不合理——应该进 subgraph 内部编辑
+    if (origNode.isSubgraphNode?.() || origNode.constructor?.name === "SubgraphNode") {
+        console.log(`${LOG} skip cloning SubgraphNode id=${origNode.id} (not supported)`);
+        return null;
+    }
+    const data = origNode.serialize();
+    const newNode = LiteGraph.createNode(data.type);
+    if (!newNode) {
+        console.warn(`${LOG} createNode failed for type "${data.type}", skip id=${origNode.id}`);
+        return null;
+    }
+    mirrorGraph.add(newNode);
+
+    const cloneData = JSON.parse(JSON.stringify(data));
+    delete cloneData.id;
+    delete cloneData.pos;
+    if (Array.isArray(cloneData.inputs)) for (const i of cloneData.inputs) i.link = null;
+    if (Array.isArray(cloneData.outputs)) for (const o of cloneData.outputs) o.links = [];
+    try { newNode.configure(cloneData); }
+    catch (e) { console.warn(`${LOG} configure failed for id=${origNode.id}:`, e); }
+
+    newNode.pos = [layout.x, layout.y];
+    newNode.__mirrorOrigId = origNode.id;
+
+    // 共享原节点所有非结构性对象引用 → 任何把状态藏在 node.X 的自定义 widget
+    // 都能自动纠缠（properties、intpos、capture、自定义 state... 不限于已知字段）
+    // 结构性字段（pos/size/widgets/inputs/outputs/graph/id/type 等）保持独立
+    const STRUCTURAL_KEYS = new Set([
+        "id", "pos", "size", "min_size", "_pos", "_size", "_posSize",
+        "graph", "type", "comfyClass", "constructor",
+        "inputs", "outputs", "widgets", "_state",
+        "flags", "mode", "order", "color", "bgcolor", "boxcolor",
+        "title", "_relative_id", "boundingRect",
+        "last_serialization", "serialize_widgets",
+        "__mirrorOrigId", "__mirrorReverseOrigCb",
+        "onDrawForeground", "onDrawBackground", "onMouseDown", "onMouseUp",
+        "onMouseMove", "onMouseLeave", "onMouseEnter", "onDblClick",
+        "onConfigure", "onSerialize", "onAdded", "onRemoved",
+        "onConnectInput", "onConnectOutput", "onConnectionsChange",
+        // subgraph host 关系相关：分享会让 mirror.remove 误伤原节点
+        "subgraph", "_subgraph", "_root", "rootGraph", "host",
+        "promotedWidgets", "_promotedWidgets",
+    ]);
+    for (const key of Object.keys(origNode)) {
+        if (STRUCTURAL_KEYS.has(key)) continue;
+        if (key.startsWith("_") && key !== "_widgets_values") continue;
+        const val = origNode[key];
+        if (val && typeof val === "object") {
+            try { newNode[key] = val; } catch (_) {}
+        }
+    }
+
+    // widget value 量子纠缠：用 Object.defineProperty 把 mirror widget 的 value
+    // 完全代理到原节点 widget 的 value。读总是拿原节点最新值，写总是写到原节点。
+    // ComfyUI 1.42 widget 内部走 _state.value 全局 store，单纯 mw.value = X 不会
+    // 触发 callback，所以以前 wrap callback 的方案漏了直接赋值的代码（如 ResolutionMaster）
+    const len = Math.min(
+        Array.isArray(newNode.widgets) ? newNode.widgets.length : 0,
+        Array.isArray(origNode.widgets) ? origNode.widgets.length : 0,
+    );
+    for (let i = 0; i < len; i++) {
+        const mw = newNode.widgets[i];
+        const ow = origNode.widgets[i];
+        if (!mw || !ow) continue;
+        const t = (mw.type || ow.type || "").toLowerCase();
+        if (t === "button") continue;
+
+        // 在 mirror widget 实例上覆盖 value 访问器（屏蔽原型上的 BaseWidget getter/setter）
+        // 某些 widget 的 value 是 configurable:false（不可重定义），跳过即可——
+        // callback wrap 路径仍然兜得住通过 callback 改值的情况
+        const existing = Object.getOwnPropertyDescriptor(mw, "value");
+        if (!existing || existing.configurable !== false) {
+            try {
+                Object.defineProperty(mw, "value", {
+                    configurable: true,
+                    enumerable: true,
+                    get() { return ow.value; },
+                    set(v) {
+                        if (Object.is(ow.value, v)) return;
+                        ow.value = v;
+                    },
+                });
+            } catch (_) { /* 静默：会落到 callback wrap 兜底 */ }
+        }
+
+        // mirror widget callback 包一层：除了原 callback 行为，再触发 root callback
+        // 让其他扩展通过 callback 钩子接收变化
+        const mwOrigCb = mw.callback;
+        mw.callback = function (v, ...rest) {
+            const r = mwOrigCb?.call(this, v, ...rest);
+            try { ow.callback?.(v, app.canvas, origNode); } catch (_) {}
+            return r;
+        };
+
+        // 反向：root 节点 callback 包一层，触发 mirror 重绘（值已自动同步，只需刷屏）
+        const owOrigCb = ow.callback;
+        ow.__mirrorReverseOrigCb = owOrigCb;
+        ow.callback = function (v, ...rest) {
+            const r = owOrigCb?.call(this, v, ...rest);
+            try { app.canvas?.setDirty?.(true, true); } catch (_) {}
+            return r;
+        };
+        state.reverseSyncRestorers.push(() => {
+            ow.callback = ow.__mirrorReverseOrigCb;
+            delete ow.__mirrorReverseOrigCb;
+        });
+    }
+
+    return newNode;
+}
+
+function buildMirrorGraph() {
+    let mirror = createMirrorSubgraphInstance();
+    if (!mirror) {
+        const LGraph = getLGraphCtor();
+        if (!LGraph) {
+            console.error(`${LOG} no LGraph constructor available`);
+            return null;
+        }
+        console.warn(`${LOG} fallback to plain LGraph (subgraph optimizations may not trigger)`);
+        mirror = new LGraph();
+    }
+
+    // mirrorGraph 删节点 → 自动 unpin（用户按 Delete 键 / 用 Remove 菜单都走这里）
+    // 不影响 rootGraph 原节点。退出 Mirror 时的批量删除有 _suppressUnpin 标记，不触发 unpin。
+    const origOnNodeRemoved = mirror.onNodeRemoved;
+    mirror.onNodeRemoved = function (node) {
+        try {
+            if (!state._suppressUnpin) {
+                const origId = node?.__mirrorOrigId;
+                if (origId != null) {
+                    const map = getPinnedMap();
+                    if (map[origId]) {
+                        delete map[origId];
+                        console.log(`${LOG} mirror node removed → unpinned uid=${origId}`);
+                    }
+                }
+            }
+        } catch (_) {}
+        if (origOnNodeRemoved) return origOnNodeRemoved.apply(this, arguments);
+    };
+
+    const map = getPinnedMap();
+    const idMap = {};
+    let success = 0, fail = 0;
+    for (const [origIdStr, layout] of Object.entries(map)) {
+        const origId = Number(origIdStr);
+        const orig = state.rootGraph.getNodeById(origId);
+        if (!orig) { fail++; continue; }
+        const mNode = cloneNodeIntoMirror(orig, mirror, layout);
+        if (mNode) { idMap[origId] = mNode.id; success++; }
+        else fail++;
+    }
+    console.log(`${LOG} mirrorGraph built: ${success} cloned, ${fail} failed`);
+    return { mirror, idMap };
+}
+
+// ---------- 视口 / 布局 ----------
+
+function fitMirrorView() {
+    const nodes = state.mirrorGraph?._nodes;
+    if (!nodes?.length) return;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of nodes) {
+        const w = n.size?.[0] ?? 200;
+        const h = n.size?.[1] ?? 100;
+        minX = Math.min(minX, n.pos[0]);
+        minY = Math.min(minY, n.pos[1] - 30);
+        maxX = Math.max(maxX, n.pos[0] + w);
+        maxY = Math.max(maxY, n.pos[1] + h);
+    }
+    if (!isFinite(minX)) return;
+    const cw = app.canvas.canvas.clientWidth || app.canvas.canvas.width;
+    const ch = app.canvas.canvas.clientHeight || app.canvas.canvas.height;
+    const pad = 80;
+    const bw = (maxX - minX) + pad * 2;
+    const bh = (maxY - minY) + pad * 2;
+    const scale = Math.min(cw / bw, ch / bh, 1);
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const ds = app.canvas.ds;
+    if (ds) {
+        ds.scale = scale;
+        ds.offset[0] = cw / 2 / scale - cx;
+        ds.offset[1] = ch / 2 / scale - cy;
+    }
+    app.canvas.setDirty?.(true, true);
+}
+
+function syncMirrorLayoutBack() {
+    if (!state.mirrorGraph || !state.rootGraph) return;
+    const pinned = state.rootGraph.extra?.mirrorPanel?.pinned;
+    if (!pinned) return;
+    for (const mNode of state.mirrorGraph._nodes) {
+        const origId = mNode.__mirrorOrigId;
+        if (origId == null) continue;
+        if (pinned[origId]) {
+            pinned[origId].x = mNode.pos[0];
+            pinned[origId].y = mNode.pos[1];
+        }
+    }
+}
+
+// 全量 mirror → root（兜底，退出时调一次）
+function syncMirrorDataToRoot() {
+    if (!state.mirrorGraph || !state.rootGraph) return;
+    for (const mNode of state.mirrorGraph._nodes) {
+        const origId = mNode.__mirrorOrigId;
+        if (origId == null) continue;
+        const orig = state.rootGraph.getNodeById(origId);
+        if (!orig) continue;
+        try {
+            const len = Math.min(
+                Array.isArray(orig.widgets) ? orig.widgets.length : 0,
+                Array.isArray(mNode.widgets) ? mNode.widgets.length : 0,
+            );
+            for (let i = 0; i < len; i++) {
+                const ow = orig.widgets[i];
+                const mw = mNode.widgets[i];
+                if (!mw || !("value" in mw) || !ow) continue;
+                const t = (mw.type || ow.type || "").toLowerCase();
+                if (t === "button") continue;
+                if (valueEqual(ow.value, mw.value)) continue;
+                ow.value = mw.value;
+                try { ow.callback?.(mw.value, app.canvas, orig); } catch (_) {}
+            }
+        } catch (_) {}
+    }
+}
+
+// 全量 root → mirror（执行后调一次，让 randomize 等回写值显示在 mirror）
+function syncRootDataToMirror() {
+    if (!state.mirrorGraph || !state.rootGraph) return;
+    let touched = 0;
+    for (const mNode of state.mirrorGraph._nodes) {
+        const origId = mNode.__mirrorOrigId;
+        if (origId == null) continue;
+        const orig = state.rootGraph.getNodeById(origId);
+        if (!orig) continue;
+        try {
+            const len = Math.min(
+                Array.isArray(orig.widgets) ? orig.widgets.length : 0,
+                Array.isArray(mNode.widgets) ? mNode.widgets.length : 0,
+            );
+            for (let i = 0; i < len; i++) {
+                const ow = orig.widgets[i];
+                const mw = mNode.widgets[i];
+                if (!mw || !("value" in mw) || !ow) continue;
+                const t = (mw.type || ow.type || "").toLowerCase();
+                if (t === "button") continue;
+                if (valueEqual(mw.value, ow.value)) continue;
+                mw.value = ow.value;
+                touched++;
+            }
+        } catch (_) {}
+    }
+    if (touched > 0) {
+        console.log(`${LOG} post-exec sync root→mirror touched ${touched} widgets`);
+        app.canvas?.setDirty?.(true, true);
+    }
+}
+
+// ---------- 视图切换 ----------
+
+function switchView(mode) {
+    if (mode === state.view) return;
+
+    if (mode === VIEW_MIRROR) {
+        const pinnedCount = Object.keys(getPinnedMap()).length;
+        if (pinnedCount === 0) {
+            alert("请先右键节点 → Pin to Mirror 标记至少一个节点");
+            return;
+        }
+        state.rootGraph = app.canvas.graph;
+
+        if (app.canvas.ds) {
+            state._savedDs = {
+                offset: [app.canvas.ds.offset[0], app.canvas.ds.offset[1]],
+                scale: app.canvas.ds.scale,
+            };
+        }
+
+        const built = buildMirrorGraph();
+        if (!built || !built.mirror) {
+            console.error(`${LOG} buildMirrorGraph failed`);
+            state.rootGraph = null;
+            return;
+        }
+        state.mirrorGraph = built.mirror;
+        state.nodeIdMap = built.idMap;
+
+        try { safeSetGraph(state.mirrorGraph); }
+        catch (e) {
+            console.error(`${LOG} setGraph(mirror) failed:`, e);
+            // 还原状态
+            for (const r of state.reverseSyncRestorers) try { r(); } catch (_) {}
+            state.reverseSyncRestorers = [];
+            purgeMirrorSubgraphsFrom(state.rootGraph);
+            state.mirrorGraph = null;
+            state.nodeIdMap = null;
+            state.rootGraph = null;
+            return;
+        }
+        fitMirrorView();
+        console.log(`${LOG} entered Mirror (pinned=${pinnedCount})`);
+    } else {
+        exitMirrorCleanup({ doSetGraph: true });
+    }
+
+    state.view = mode;
+    syncToggleButtonsLabel();
+}
+
+// 抽出退出清理逻辑：正常退出 + 外部检测（用户走 ComfyUI 面包屑）共用
+// doSetGraph=false 用于"已经被外部切走"，避免重复 setGraph
+function exitMirrorCleanup({ doSetGraph }) {
+    if (!state.rootGraph) return;
+
+    syncMirrorDataToRoot();
+    syncMirrorLayoutBack();
+    for (const r of state.reverseSyncRestorers) try { r(); } catch (_) {}
+    state.reverseSyncRestorers = [];
+
+    // 显式 remove 每个 mirror clone 节点 → 触发 ComfyUI 的 DOM widget 卸载
+    // 否则自定义 DOM widget（词库面板、提示词编辑器等）会留在页面上盖住画布
+    // _suppressUnpin 标记让 mirror.onNodeRemoved 知道这是退出清理，不要清 pin map
+    if (state.mirrorGraph?._nodes?.length) {
+        state._suppressUnpin = true;
+        try {
+            const nodesCopy = [...state.mirrorGraph._nodes];
+            for (const n of nodesCopy) {
+                try { state.mirrorGraph.remove(n); } catch (_) {}
+            }
+        } finally {
+            state._suppressUnpin = false;
+        }
+    }
+
+    if (doSetGraph) {
+        try { safeSetGraph(state.rootGraph); }
+        catch (e) { console.error(`${LOG} setGraph(root) failed:`, e); return; }
+    }
+
+    const savedDs = state._savedDs;
+    state._savedDs = null;
+    if (savedDs && doSetGraph) {
+        const restore = () => {
+            if (!app.canvas.ds) return;
+            app.canvas.ds.offset[0] = savedDs.offset[0];
+            app.canvas.ds.offset[1] = savedDs.offset[1];
+            try { app.canvas.ds.offset = [savedDs.offset[0], savedDs.offset[1]]; } catch (_) {}
+            app.canvas.ds.scale = savedDs.scale;
+            app.canvas.setDirty?.(true, true);
+        };
+        requestAnimationFrame(() => requestAnimationFrame(restore));
+    }
+    purgeMirrorSubgraphsFrom(state.rootGraph);
+    state.mirrorSubgraphId = null;
+    state.mirrorGraph = null;
+    state.nodeIdMap = null;
+    state.rootGraph = null;
+    state.view = VIEW_CANVAS;
+    syncToggleButtonsLabel();
+    console.log(`${LOG} exited Mirror (doSetGraph=${doSetGraph})`);
+}
+
+// hijack canvas.setGraph：检测外部切走 mirror（ComfyUI 面包屑 / 其他扩展导航）
+let _setGraphHijacked = false;
+let _internalSetGraph = false;  // 标记自己调用，避免误触
+function hijackCanvasSetGraph() {
+    if (_setGraphHijacked) return;
+    const canvas = app.canvas;
+    if (!canvas || typeof canvas.setGraph !== "function") return;
+    const origSetGraph = canvas.setGraph.bind(canvas);
+    canvas.setGraph = function (g, ...rest) {
+        const wasInternal = _internalSetGraph;
+        const result = origSetGraph(g, ...rest);
+        if (!wasInternal && state.view === VIEW_MIRROR && g !== state.mirrorGraph) {
+            console.log(`${LOG} external setGraph detected, running cleanup`);
+            exitMirrorCleanup({ doSetGraph: false });
+        }
+        return result;
+    };
+    _setGraphHijacked = true;
+}
+
+// 包装一下我们自己的 setGraph 调用以打标记
+function safeSetGraph(g) {
+    _internalSetGraph = true;
+    try { app.canvas.setGraph(g); }
+    finally { _internalSetGraph = false; }
+}
+
+// 性能探针：在 console 调用，例如 await mirrorPerf("canvas-baseline")
+// 录 N 个 bucket 的 FPS / 最大帧时长，便于客观对比 Canvas 与 Mirror 视图的渲染开销
+window.mirrorPerf = function (label = "probe", bucketMs = 500, nBuckets = 10) {
+    return new Promise((resolve) => {
+        const buckets = [];
+        const startAll = performance.now();
+        let bucketStart = startAll;
+        let frames = 0, maxFrame = 0, lastFrame = bucketStart;
+        function tick(t) {
+            const dt = t - lastFrame;
+            if (dt > maxFrame) maxFrame = dt;
+            frames++;
+            lastFrame = t;
+            if (t - bucketStart >= bucketMs) {
+                buckets.push({
+                    bucket: buckets.length + 1,
+                    tMs: Math.round(t - startAll),
+                    frames,
+                    fps: +(frames * 1000 / (t - bucketStart)).toFixed(1),
+                    maxFrameMs: +maxFrame.toFixed(1),
+                });
+                bucketStart = t; frames = 0; maxFrame = 0;
+            }
+            if (buckets.length < nBuckets) requestAnimationFrame(tick);
+            else {
+                console.log(`%c=== mirrorPerf [${label}] ===`, "color:#4a6cf7;font-weight:bold");
+                console.table(buckets);
+                const avgFps = buckets.reduce((s, b) => s + b.fps, 0) / buckets.length;
+                const worstFrame = Math.max(...buckets.map(b => b.maxFrameMs));
+                console.log(`avg FPS: ${avgFps.toFixed(1)}, worst frame: ${worstFrame.toFixed(1)}ms`);
+                resolve(buckets);
+            }
+        }
+        requestAnimationFrame(tick);
+        console.log(`${LOG} probe started: label="${label}" ${bucketMs}ms × ${nBuckets} buckets, total ${bucketMs * nBuckets / 1000}s`);
+    });
+};
+
+function syncToggleButtonsLabel() {
+    if (state.actionbarBtn) {
+        state.actionbarBtn.dataset.view = state.view;
+        state.actionbarBtn.textContent = state.view === VIEW_MIRROR ? "✓ Mirror" : "🪞 Mirror";
+    }
+    if (state.fallbackBtn) {
+        state.fallbackBtn.dataset.view = state.view;
+        state.fallbackBtn.textContent = state.view === VIEW_MIRROR ? "✓ Mirror" : "Mirror";
+    }
+}
+
+// ---------- 操作栏按钮 ----------
+
+function isVisible(el) {
+    if (!el) return false;
+    if (el.offsetParent === null) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 4 && r.height > 4;
+}
+
+function matchButton(btn, name) {
+    const t = (btn.textContent || "").replace(/\s+/g, " ").trim();
+    const aria = btn.getAttribute("aria-label") || "";
+    const title = btn.getAttribute("title") || "";
+    const lname = name.toLowerCase();
+    return (
+        t.toLowerCase().includes(lname) ||
+        aria.toLowerCase().includes(lname) ||
+        title.toLowerCase().includes(lname)
+    );
+}
+
+function findAnchorButton() {
+    const allBtns = Array.from(document.querySelectorAll("button")).filter(isVisible);
+    const candidates = ["运行", "Run", "Queue", "Show Image Feed", "Manager"];
+    for (const name of candidates) {
+        const btn = allBtns.find((b) => matchButton(b, name));
+        if (btn) return { btn, label: name };
+    }
+    return null;
+}
+
+// 简洁的"面板/网格"图标 SVG，避免 emoji 字体兜底问题
+const MIRROR_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>`;
+
+function renderMirrorButtonContent(btn) {
+    btn.innerHTML = `${MIRROR_ICON_SVG}<span>Mirror</span>`;
+}
+
+function makeMirrorButton() {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "mirror-actionbar-btn";
+    btn.title = "Toggle Mirror Panel view";
+    btn.dataset.mirrorBtn = "true";
+    btn.dataset.view = state.view;
+    renderMirrorButtonContent(btn);
+    btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        switchView(state.view === VIEW_CANVAS ? VIEW_MIRROR : VIEW_CANVAS);
+    });
+    return btn;
+}
+
+function tryInjectIntoActionbar() {
+    if (state.actionbarBtn && document.contains(state.actionbarBtn)) return true;
+    const found = findAnchorButton();
+    if (!found) return false;
+    const btn = makeMirrorButton();
+    found.btn.insertAdjacentElement("afterend", btn);
+    requestAnimationFrame(() => {
+        const rect = btn.getBoundingClientRect();
+        const visible = btn.offsetParent !== null && rect.width > 0 && rect.height > 0;
+        if (!visible) return;
+        if (state.fallbackBtn) { state.fallbackBtn.remove(); state.fallbackBtn = null; }
+    });
+    state.actionbarBtn = btn;
+    console.log(`${LOG} actionbar button inserted after "${found.label}"`);
+    return true;
+}
+
+function watchActionbar() {
+    if (tryInjectIntoActionbar()) return;
+    const obs = new MutationObserver(() => {
+        if (tryInjectIntoActionbar()) {
+            obs.disconnect();
+            state.actionbarObserver = null;
+        }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+    state.actionbarObserver = obs;
+    setTimeout(() => {
+        if (state.actionbarObserver) {
+            state.actionbarObserver.disconnect();
+            state.actionbarObserver = null;
+        }
+    }, 30000);
+}
+
+function injectFallbackToggle() {
+    if (state.fallbackBtn) return;
+    const btn = document.createElement("button");
+    btn.className = "mirror-toggle-btn";
+    btn.dataset.view = VIEW_CANVAS;
+    btn.textContent = "Mirror";
+    Object.assign(btn.style, {
+        position: "fixed", top: "8px", right: "8px", zIndex: "1000",
+    });
+    btn.addEventListener("click", () => {
+        switchView(state.view === VIEW_CANVAS ? VIEW_MIRROR : VIEW_CANVAS);
+    });
+    document.body.appendChild(btn);
+    state.fallbackBtn = btn;
+}
+
+// ---------- 右键菜单 ----------
+
+function buildPinMenuItem(node) {
+    if (state.view === VIEW_MIRROR) {
+        const origId = node.__mirrorOrigId;
+        if (origId == null) return null;
+        return {
+            content: "✗ Remove from Mirror",
+            callback: () => {
+                // 直接从 mirrorGraph 删节点 → 触发 mirrorGraph.onNodeRemoved → 清 pin
+                try { state.mirrorGraph?.remove(node); }
+                catch (e) {
+                    // 兜底：直接清 pin map（onNodeRemoved 没触发的情况）
+                    const map = getPinnedMap();
+                    delete map[origId];
+                    console.warn(`${LOG} mirrorGraph.remove failed, fallback to pin delete:`, e);
+                }
+                app.canvas?.setDirty?.(true, true);
+            },
+        };
+    }
+    // Canvas 视图：支持批量。如果当前选中多个节点（含右键的这个），全部一起处理
+    const selected = collectSelectedNodes(node);
+    const pinned = isPinned(node);
+    if (selected.length > 1) {
+        // 多选时根据"右键的这个节点"的状态决定整组动作（与原生 unpin/pin 一致）
+        const label = pinned
+            ? `✓ Unpin ${selected.length} nodes from Mirror`
+            : `🪞 Pin ${selected.length} nodes to Mirror Panel`;
+        return {
+            content: label,
+            callback: () => {
+                for (const n of selected) {
+                    if (pinned) unpinNode(n);
+                    else if (!isPinned(n)) pinNode(n);
+                }
+            },
+        };
+    }
+    return {
+        content: pinned ? "✓ Unpin from Mirror" : "🪞 Pin to Mirror Panel",
+        callback: () => { if (pinned) unpinNode(node); else pinNode(node); },
+    };
+}
+
+// 收集当前选中的所有节点（含右键的这个），用于批量 pin/unpin
+function collectSelectedNodes(rightClickedNode) {
+    const sel = app.canvas?.selected_nodes;
+    const out = new Set();
+    if (rightClickedNode) out.add(rightClickedNode);
+    if (sel) {
+        // selected_nodes 可能是 object map (id→node) 或 Set
+        if (sel instanceof Set || Array.isArray(sel)) {
+            for (const n of sel) if (n) out.add(n);
+        } else if (typeof sel === "object") {
+            for (const k of Object.keys(sel)) {
+                const n = sel[k];
+                if (n) out.add(n);
+            }
+        }
+    }
+    return [...out];
+}
+
+function hijackCanvasMenu() {
+    const LGCanvas =
+        (typeof LiteGraph !== "undefined" ? LiteGraph?.LGraphCanvas : null) ||
+        window.LGraphCanvas ||
+        app.canvas?.constructor;
+    if (!LGCanvas?.prototype?.getNodeMenuOptions) {
+        console.warn(`${LOG} LGraphCanvas.getNodeMenuOptions not found`);
+        return false;
+    }
+    if (LGCanvas.prototype.__mirrorPanelMenuHooked) return false;
+    const orig = LGCanvas.prototype.getNodeMenuOptions;
+    LGCanvas.prototype.getNodeMenuOptions = function (node) {
+        const options = orig.apply(this, arguments);
+        try {
+            const item = buildPinMenuItem(node);
+            if (item && Array.isArray(options)) options.push(null, item);
+        } catch (e) {
+            console.warn(`${LOG} canvas menu hook error:`, e);
+        }
+        return options;
+    };
+    LGCanvas.prototype.__mirrorPanelMenuHooked = true;
+    return true;
+}
+
+// ---------- 入口 ----------
+
+app.registerExtension({
+    name: "MirrorPanel",
+
+    async setup() {
+        console.log(`${LOG} setup()`);
+        const env = detectEnv();
+        console.log(`${LOG} env:`, env);
+        if (!env.hasApp || !env.hasGraph || !env.hasCanvas || !env.hasSetGraph) {
+            console.error(`${LOG} required APIs missing, abort`);
+            return;
+        }
+
+        injectStyles();
+        const ok = hijackCanvasMenu();
+        console.log(`${LOG} canvas menu hook: ${ok ? "ok" : "skipped"}`);
+        // 拦截外部 setGraph（ComfyUI 面包屑、第三方导航等）→ 自动跑退出清理
+        hijackCanvasSetGraph();
+
+        // 启动 + 工作流加载时清掉前次会话遗留
+        sweepStaleMirrorSubgraphs("setup");
+        pruneDeadPins("setup");
+        if (typeof app.graph?.configure === "function") {
+            const orig = app.graph.configure;
+            app.graph.configure = function (...args) {
+                const r = orig.apply(this, args);
+                try { sweepStaleMirrorSubgraphs("graph.configure"); pruneDeadPins("graph.configure"); }
+                catch (_) {}
+                return r;
+            };
+        }
+
+        // 节点删除自动 unpin
+        if (app.graph) {
+            const origOnRemoved = app.graph.onNodeRemoved;
+            app.graph.onNodeRemoved = function (node) {
+                try {
+                    const pinned = state.rootGraph?.extra?.mirrorPanel?.pinned
+                        || app.graph?.extra?.mirrorPanel?.pinned;
+                    if (pinned && node && pinned[node.id]) {
+                        delete pinned[node.id];
+                    }
+                } catch (_) {}
+                if (origOnRemoved) return origOnRemoved.apply(this, arguments);
+            };
+        }
+
+        // 执行结束后 root → mirror 同步（randomize 等回写值的展示路径）
+        if (!state.apiListenerInstalled && api && typeof api.addEventListener === "function") {
+            api.addEventListener("execution_success", () => {
+                if (state.view === VIEW_MIRROR) syncRootDataToMirror();
+            });
+            api.addEventListener("executed", () => {
+                if (state.view === VIEW_MIRROR) syncRootDataToMirror();
+            });
+            state.apiListenerInstalled = true;
+        }
+
+        injectFallbackToggle();
+        watchActionbar();
+
+        console.log(`${LOG} setup OK`);
+    },
+});
+
+console.log(`${LOG} module loaded`);

@@ -1,0 +1,15 @@
+[project]
+name = "comfyui-mirror-panel"
+version = "1.0.0"
+description = "Pin nodes to a Mirror view backed by a clone graph: edit only what matters, original workflow untouched, subgraph-level performance."
+requires-python = ">=3.9"
+license = { text = "GPL-3.0-or-later" }
+classifiers = ["License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)"]
+
+[project.urls]
+Repository = "https://github.com/1756141021/comfyui-mirror-panel"
+
+[tool.comfy]
+PublisherId = "1756141021"
+DisplayName = "Mirror Panel"
+Icon = ""
