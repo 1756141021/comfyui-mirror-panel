@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 1.0.2
+
+支持把 SubgraphNode（subgraph 包装节点）pin 进 mirror 当卡片用 —— promoted widget 能在 mirror 里编辑，值通过原生路径回到 root。
+
+之前 v1.0.0 直接拒了，因为 SubgraphNode 默认的 `onRemoved` 会在共享的 subgraph 实例上派 `widget-demoted` 事件、还会写 `R().setPromotions` —— 退出 mirror 时会反噬 root 上的原节点。
+
+修法：clone 完 SubgraphNode 之后，把 mirror 这份的 `onRemoved` 换成只关自己的 event controller / 输入 listener，不动 subgraph events、不动 promotions store。
+
 ## 1.0.1
 
 修：DOM widget 双向同步。
