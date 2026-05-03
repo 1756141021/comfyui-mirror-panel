@@ -574,35 +574,50 @@ function switchView(mode) {
         }
 
         // ===== 调试探针 =====
-        // 1) root SubgraphNode 的 graph setter（看 .graph = null 路径）
-        // 2) LGraph.prototype.remove 全局钩子（看谁 remove 了 root 上的 SubgraphNode）
-        // 3) rootGraph._nodes splice 钩子（看谁动了 root._nodes 数组）
+        // 深度遍历 root + 所有嵌套 subgraph，给每一个 SubgraphNode 实例都装 .graph setter。
+        // rgthree 的 jsnodes.js computeVisibleNodes 是深度遍历的，报错的 SubgraphNode
+        // 可能在嵌套 subgraph 里，只 probe rootGraph._nodes 抓不到。
         try {
             window.__mirrorGraphProbes = window.__mirrorGraphProbes || [];
-            for (const n of state.rootGraph._nodes || []) {
-                if (!n?.isSubgraphNode?.()) continue;
-                if (n.__mirrorGraphProbed) continue;
+            const seen = new Set();
+            const probeOne = (n, hostLabel) => {
+                if (!n?.isSubgraphNode?.()) return;
+                if (n.__mirrorGraphProbed) return;
                 const id = n.id;
                 let val = n.graph;
+                const initialNull = !val;
                 Object.defineProperty(n, "graph", {
                     configurable: true,
                     enumerable: true,
                     get() { return val; },
                     set(v) {
                         if (!v && val) {
-                            console.error(`${LOG} [PROBE-SET] root SubgraphNode ${id} .graph nulled. stack:`, new Error().stack);
+                            console.error(`${LOG} [PROBE-SET] SubgraphNode id=${id} (host=${hostLabel}) .graph nulled. stack:`, new Error().stack);
                         }
                         val = v;
                     },
                 });
                 n.__mirrorGraphProbed = true;
-                window.__mirrorGraphProbes.push({ node: n, restore: () => {
+                if (initialNull) {
+                    console.warn(`${LOG} [PROBE-INIT] SubgraphNode id=${id} (host=${hostLabel}) had .graph=null AT INSTALL TIME (pre-existing)`);
+                }
+                window.__mirrorGraphProbes.push({ node: n, id, hostLabel, restore: () => {
                     delete n.graph;
                     n.graph = val;
                     delete n.__mirrorGraphProbed;
                 }});
-            }
-            console.log(`${LOG} [PROBE] installed graph setter on ${window.__mirrorGraphProbes.length} root SubgraphNode(s)`);
+            };
+            const visit = (g, label) => {
+                if (!g || seen.has(g)) return;
+                seen.add(g);
+                for (const n of g._nodes || []) probeOne(n, label);
+                if (g.subgraphs?.values) {
+                    for (const sg of g.subgraphs.values()) visit(sg, `${label}>sg:${sg?.id || "?"}`);
+                }
+            };
+            visit(state.rootGraph, "root");
+            const ids = window.__mirrorGraphProbes.map(p => `${p.id}@${p.hostLabel}`).join(", ");
+            console.log(`${LOG} [PROBE] installed graph setter on ${window.__mirrorGraphProbes.length} SubgraphNode(s). ids: ${ids}`);
         } catch (e) { console.warn(`${LOG} probe install failed:`, e); }
 
         // 全局 LGraph.remove 钩子：谁 remove SubgraphNode 都打堆栈
