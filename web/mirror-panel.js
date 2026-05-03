@@ -282,6 +282,11 @@ function cloneNodeIntoMirror(origNode, mirrorGraph, layout) {
         // subgraph host 关系相关：分享会让 mirror.remove 误伤原节点
         "subgraph", "_subgraph", "_root", "rootGraph", "host",
         "promotedWidgets", "_promotedWidgets",
+        // DOM 容器不共享：各自有独立的 DOM element（如 customUI / lorasWidget 的
+        // container）。property share 会把 orig 的 element 赋给 clone，但
+        // addDOMWidget 注册的 widget.element 指向的还是 clone 自己的新 element，
+        // 导致 refreshColorFilter 等 DOM 更新打到 orig 的 element 上而非 clone 的。
+        "customUI", "element",
     ]);
     for (const key of Object.keys(origNode)) {
         if (STRUCTURAL_KEYS.has(key)) continue;
