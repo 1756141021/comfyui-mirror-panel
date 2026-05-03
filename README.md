@@ -100,12 +100,21 @@ git clone https://github.com/1756141021/comfyui-mirror-panel.git
 
 ### 使用流程
 
-1. 加载你的工作流
-2. 右键想常改的节点 → "🪞 Pin to Mirror Panel"（可多选批量）
-3. 点顶栏 🪞 Mirror 进入 Mirror 视图
-4. 在 Mirror 里自由排版卡片、改值、运行
-5. 切回 Canvas → 你的工作流原样在那里，刚才的所有改动都已落到原节点上
-6. 保存 workflow，下次打开 pin 列表 + 卡片位置都还在
+**1. 加载你的工作流。**
+
+**2. 右键你想常改的节点 → 选最底下的 "Pin to Mirror Panel"。多选节点右键会变成 "Pin N nodes to Mirror Panel"，一键批量。**
+
+![Pin 菜单](docs/pin-menu.png)
+
+**3. 顶栏右上找到 Mirror 按钮，点它进入 Mirror 视图。**
+
+![Mirror 按钮](docs/mirror-button.png)
+
+**4. 在 Mirror 里自由排版卡片、改值、点 Queue 跑图。**
+
+**5. 想回 Canvas 再点一次 Mirror 按钮。你的工作流原样还在，刚才的改动都已落到原节点。**
+
+**6. 保存 workflow，下次打开 pin 列表 + 卡片位置都还在。**
 
 ---
 
@@ -230,12 +239,21 @@ Requirements: ComfyUI frontend ≥ 1.42 (uses `rootGraph.createSubgraph`, `canva
 
 ### Usage
 
-1. Load your workflow
-2. Right-click the nodes you keep tweaking → "🪞 Pin to Mirror Panel" (multi-select supported)
-3. Click the toolbar 🪞 Mirror to enter Mirror view
-4. Arrange cards, edit values, run prompts freely
-5. Switch back to Canvas → your workflow is exactly as it was, every edit applied to the originals
-6. Save the workflow — pin list + card positions persist across sessions
+**1. Load your workflow.**
+
+**2. Right-click the nodes you keep tweaking → bottom menu item "Pin to Mirror Panel". Multi-selecting changes it to "Pin N nodes to Mirror Panel" for batch.**
+
+![Pin menu](docs/pin-menu.png)
+
+**3. Find the Mirror button in the top toolbar. Click to enter Mirror view.**
+
+![Mirror button](docs/mirror-button.png)
+
+**4. In Mirror, arrange cards however you like, edit values, hit Queue.**
+
+**5. Click the Mirror button again to return to Canvas. Your workflow is exactly as before, every edit applied to the originals.**
+
+**6. Save the workflow — pin list + card positions persist across sessions.**
 
 ---
 
