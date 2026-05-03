@@ -232,12 +232,13 @@ function pruneDeadPins(reason) {
 
 // 把一个 root 节点 clone 进 mirrorGraph
 function cloneNodeIntoMirror(origNode, mirrorGraph, layout) {
-    // SubgraphNode 当卡片处理：允许 clone（和它包装的 subgraph 实例共享 reference），
-    // promoted widgets 能在 mirror 里编辑、值实时同步回 root（原生 widget 路径）。
-    // 危险点是 onRemoved 默认会向 this.subgraph.events 派 "widget-demoted"，
-    // 还会写 R().setPromotions —— 在共享 subgraph 实例上做这些事会反噬原节点。
-    // 处理：clone 完之后改写 mirror 这份的 onRemoved，只关自己的 event controller。
-    const isSubgraphNode = !!(origNode.isSubgraphNode?.() || origNode.constructor?.name === "SubgraphNode");
+    // SubgraphNode 拒绝克隆：它们和包装的 subgraph 实例有复杂的 host 关系
+    // 共享会让 mirror.remove 反向破坏原节点的 graph 引用（NullGraphError）
+    // pin 一个 subgraph 包装节点也不合理——应该进 subgraph 内部编辑
+    if (origNode.isSubgraphNode?.() || origNode.constructor?.name === "SubgraphNode") {
+        console.log(`${LOG} skip cloning SubgraphNode id=${origNode.id} (not supported)`);
+        return null;
+    }
     const data = origNode.serialize();
     const newNode = LiteGraph.createNode(data.type);
     if (!newNode) {
@@ -368,22 +369,6 @@ function cloneNodeIntoMirror(origNode, mirrorGraph, layout) {
             ow.callback = ow.__mirrorReverseOrigCb;
             delete ow.__mirrorReverseOrigCb;
         });
-    }
-
-    // SubgraphNode 兜底：默认 onRemoved 会在共享 subgraph 实例上派 widget-demoted 事件，
-    // 还会写 R().setPromotions —— 这两条会影响 root 上的原节点。换成只关 mirror 自己的
-    // event controller 的安全版本。
-    if (isSubgraphNode) {
-        newNode.onRemoved = function () {
-            try { this._eventAbortController?.abort?.(); } catch (_) {}
-            try {
-                if (Array.isArray(this.inputs)) {
-                    for (const inp of this.inputs) {
-                        try { inp?._listenerController?.abort?.(); } catch (_) {}
-                    }
-                }
-            } catch (_) {}
-        };
     }
 
     return newNode;
