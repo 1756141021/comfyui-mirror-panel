@@ -316,7 +316,23 @@ function cloneNodeIntoMirror(origNode, mirrorGraph, layout) {
                         ow.value = v;
                     },
                 });
-            } catch (_) { /* 静默：会落到 callback wrap 兜底 */ }
+            } catch (_) { /* 静默：落到下面 DOM widget 兜底 */ }
+        }
+
+        // DOM widget 兜底：addDOMWidget 给 widget.value 装的是 configurable:false 的存取器，
+        // 上面的 defineProperty 装不上。这类 widget 的内部 toggle/输入都走
+        // widget.value = X → options.setValue(X) → 写到自己的闭包，根本不到 ow。
+        // 包一层 mw.options.setValue：先调原 setValue 维持 mirror 自身渲染，
+        // 再把同一个值灌给 ow.options.setValue，让 root 闭包同步更新。
+        if (mw.options && typeof mw.options.setValue === "function" &&
+            ow.options && typeof ow.options.setValue === "function") {
+            const mwOrigSetValue = mw.options.setValue;
+            const owSetValue = ow.options.setValue;
+            mw.options.setValue = function (v) {
+                const r = mwOrigSetValue.call(this, v);
+                try { owSetValue.call(ow.options, v); } catch (_) {}
+                return r;
+            };
         }
 
         // mirror widget callback 包一层：除了原 callback 行为，再触发 root callback

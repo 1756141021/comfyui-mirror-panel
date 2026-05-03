@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 1.0.1
+
+修：DOM widget 在 mirror 内改值同步不到 canvas（典型表现：Lora Manager 的 toggle 在 mirror 里关掉一个 lora，按 Run 后所有 lora 又被勾上）。
+
+根因：ComfyUI 的 `addDOMWidget` 在 widget 实例上装的 `value` 是 `configurable: false` 的存取器，原本依赖 `Object.defineProperty(mw, "value")` 接管的代理装不上。这类 widget 的内部状态都走 `widget.value = X → options.setValue(X) → 写到自己的闭包`，到不了 root 节点。
+
+修法：mw clone 时再包一层 `mw.options.setValue`，原 setValue 跑完后用同一个值再调一遍 `ow.options.setValue`，让 root 闭包同步更新。callback wrap 路径不变。
+
 ## 1.0.0
 
 首个稳定版本。架构与全部修复在 200+ 节点真实工作流上验证通过。
