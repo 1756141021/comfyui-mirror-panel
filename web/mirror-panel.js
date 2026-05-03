@@ -796,16 +796,16 @@ function exitMirrorCleanup({ doSetGraph }) {
                     // root 画布下次 draw 那个 wrapper 立刻 NullGraphError。
                     // 手动从 mirror 的 _nodes / _nodes_by_id 摘掉、置 graph=null 即可。
                     if (n.isSubgraphNode?.()) {
+                        // 不置 graph=null：7678 这类 mirror clone 如果因 Vue 反应式
+                        // 时序问题最终出现在 rootGraph._nodes，graph=mirrorGraph 时
+                        // n.rootGraph → mirrorGraph.rootGraph → rootGraph 仍然可用，
+                        // 不会 NullGraphError；而 graph=null 会直接炸。
                         const arr = state.mirrorGraph._nodes;
                         const idx = arr.indexOf(n);
                         if (idx !== -1) arr.splice(idx, 1);
-                        else console.warn(`${LOG} [PROBE-CLEANUP] SubgraphNode id=${n.id} NOT FOUND in mirror._nodes! arr.length=${arr.length}`);
                         if (state.mirrorGraph._nodes_by_id) {
                             delete state.mirrorGraph._nodes_by_id[n.id];
                         }
-                        const before = n.graph;
-                        try { n.graph = null; } catch (e) { console.error(`${LOG} [PROBE-CLEANUP] set graph=null threw for id=${n.id}`, e); }
-                        console.log(`${LOG} [PROBE-CLEANUP] SubgraphNode id=${n.id} cleaned, graph was ${before?.id} now ${n.graph}`);
                     } else {
                         state.mirrorGraph.remove(n);
                     }
