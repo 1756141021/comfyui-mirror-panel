@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 1.0.3
+
+修：pin 多个 SubgraphNode 时会卡死（甚至触发 root 节点 NullGraphError）。
+
+两个根因：
+1. `LiteGraph.createNode(subgraphType)` 在某些注册下可能返回 root 那个原 SubgraphNode 实例本身。`mirrorGraph.add(it)` 把 root 节点搬过来，退出 mirror 时 `mirror.remove` 把它的 `graph` 置 null，root 画布再 draw 它就 NullGraphError。
+2. SubgraphNode 构造时往共享的 `this.subgraph.events` 上挂一套监听器。pin N 个 wrapper 就在同一个 events bus 上挂 N 套，任何事件 fire 全部级联 → 卡死。
+
+修法：
+- clone 完检测 `newNode === origNode`，是同一个实例就跳过。
+- 真正的新实例，立刻 abort 它的 `_eventAbortController` 和每个 input 的 `_listenerController`，让 mirror 不在共享 bus 上听事件。mirror 是只读快照视图，不需要响应 subgraph 内部变更。
+
 ## 1.0.2
 
 支持把 SubgraphNode（subgraph 包装节点）pin 进 mirror 当卡片用 —— promoted widget 能在 mirror 里编辑，值通过原生路径回到 root。

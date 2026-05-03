@@ -244,6 +244,13 @@ function cloneNodeIntoMirror(origNode, mirrorGraph, layout) {
         console.warn(`${LOG} createNode failed for type "${data.type}", skip id=${origNode.id}`);
         return null;
     }
+    // 防御：subgraph 类型的 createNode 在某些注册下可能返回 root 那个原节点本身。
+    // 此时 mirrorGraph.add(newNode) 会把 root 节点搬过来，mirror.remove 时 graph
+    // 被置 null，root 画布再 draw 它就 NullGraphError。检测同实例直接放弃。
+    if (newNode === origNode) {
+        console.warn(`${LOG} createNode returned same instance for type "${data.type}" id=${origNode.id}, skip`);
+        return null;
+    }
     mirrorGraph.add(newNode);
 
     const cloneData = JSON.parse(JSON.stringify(data));
@@ -370,20 +377,26 @@ function cloneNodeIntoMirror(origNode, mirrorGraph, layout) {
         });
     }
 
-    // SubgraphNode 兜底：默认 onRemoved 会在共享 subgraph 实例上派 widget-demoted 事件，
-    // 还会写 R().setPromotions —— 这两条会影响 root 上的原节点。换成只关 mirror 自己的
-    // event controller 的安全版本。
+    // SubgraphNode 兜底
     if (isSubgraphNode) {
-        newNode.onRemoved = function () {
-            try { this._eventAbortController?.abort?.(); } catch (_) {}
-            try {
-                if (Array.isArray(this.inputs)) {
-                    for (const inp of this.inputs) {
-                        try { inp?._listenerController?.abort?.(); } catch (_) {}
-                    }
+        // 关键：SubgraphNode 构造时往共享的 this.subgraph.events 上挂了一套
+        // (input-added / removing-input / output-added / removing-output / renaming-input...)
+        // 监听器。pin 多个 wrapper 就在同一个 events bus 上挂多套，任何事件 fire 都会
+        // 级联触发所有 mirror clone 的 listener → 卡死。
+        // mirror 是只读快照视图，不需要响应 subgraph 内部变更，clone 完立刻 abort。
+        try { newNode._eventAbortController?.abort?.(); } catch (_) {}
+        try {
+            if (Array.isArray(newNode.inputs)) {
+                for (const inp of newNode.inputs) {
+                    try { inp?._listenerController?.abort?.(); } catch (_) {}
                 }
-            } catch (_) {}
-        };
+            }
+        } catch (_) {}
+
+        // 默认 onRemoved 还会在共享 subgraph events 上派 widget-demoted、
+        // 写 R().setPromotions(rootGraph.id, this.id, []) —— 这些会反噬 root 上原节点。
+        // listener 已经在上面 abort 掉，无清理可做，换成 noop。
+        newNode.onRemoved = function () {};
     }
 
     return newNode;
