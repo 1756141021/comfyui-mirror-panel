@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 1.0.5
+
+修：pin SubgraphNode（subgraph 包装节点）后退出 mirror 时 `NullGraphError: SubgraphNode N has no graph`。
+
+根因：cleanup 里对 SubgraphNode mirror clone 显式做了 `n.graph = null`。ComfyUI 的 Vue 反应式时序（在 setGraph/purge 完成后的微任务/下一帧）可能把这个 clone 塞进 rootGraph._nodes。此时 clone.graph=null → draw 时 `rootGraph` getter 直接抛。
+
+修法：cleanup 时只从 mirrorGraph._nodes / _nodes_by_id 摘掉，不置 null。如果 clone 出现在 rootGraph._nodes，`clone.graph=mirrorGraph → mirrorGraph.rootGraph → rootGraph`，rootGraph getter 仍然可用，不抛错。clone 持有 mirrorGraph 引用，等 rootGraph 失去 clone 引用时再 GC。
+
 ## 1.0.4
 
 修：第二次进 mirror 退出时报 root SubgraphNode `NullGraphError` —— 之前 1.0.3 只挡了构造侧（同实例 skip + abort listener），删除侧没动。

@@ -573,152 +573,6 @@ function switchView(mode) {
             };
         }
 
-        // ===== 调试探针 =====
-        // 深度遍历 + 在 SubgraphNode.prototype 上 wrap rootGraph getter（捕获所有实例）
-        try {
-            // 1) 在 prototype 上拦 rootGraph getter，throw 之前打 id + this 的引用上下文
-            const sample = (state.rootGraph?._nodes || []).find(n => n?.isSubgraphNode?.());
-            if (sample) {
-                const proto = Object.getPrototypeOf(sample);
-                const desc = Object.getOwnPropertyDescriptor(proto, "rootGraph");
-                if (desc && desc.get && !proto.__mirrorRootGraphPatched) {
-                    const origGet = desc.get;
-                    Object.defineProperty(proto, "rootGraph", {
-                        configurable: true,
-                        enumerable: desc.enumerable,
-                        get() {
-                            if (!this.graph) {
-                                console.error(`${LOG} [PROBE-NULLGRAPH] SubgraphNode id=${this.id} type=${this.type} subgraph=${this.subgraph?.id} about to throw. Walking refs...`);
-                                // Find which graph references this node
-                                const root = state.rootGraph;
-                                const checkGraph = (g, path) => {
-                                    if (!g || !g._nodes) return;
-                                    if (g._nodes.includes(this)) {
-                                        console.error(`  found in ${path}._nodes`);
-                                    }
-                                    if (g._nodes_by_id?.[this.id] === this) {
-                                        console.error(`  found in ${path}._nodes_by_id[${this.id}]`);
-                                    }
-                                    if (g.subgraphs?.values) {
-                                        for (const sg of g.subgraphs.values()) {
-                                            checkGraph(sg, `${path}>sg:${sg?.id}`);
-                                        }
-                                    }
-                                };
-                                checkGraph(root, "root");
-                                if (state.mirrorGraph) checkGraph(state.mirrorGraph, "mirror");
-                            }
-                            return origGet.call(this);
-                        },
-                    });
-                    proto.__mirrorRootGraphPatched = true;
-                    window.__mirrorRootGraphRestore = () => {
-                        Object.defineProperty(proto, "rootGraph", desc);
-                        delete proto.__mirrorRootGraphPatched;
-                    };
-                    console.log(`${LOG} [PROBE] patched SubgraphNode.prototype.rootGraph getter`);
-                }
-            }
-        } catch (e) { console.warn(`${LOG} prototype probe failed:`, e); }
-        // 2) 深度遍历 + 实例 graph setter（保留之前的，作为补充信号）
-        try {
-            window.__mirrorGraphProbes = window.__mirrorGraphProbes || [];
-            const seen = new Set();
-            const probeOne = (n, hostLabel) => {
-                if (!n?.isSubgraphNode?.()) return;
-                if (n.__mirrorGraphProbed) return;
-                const id = n.id;
-                let val = n.graph;
-                const initialNull = !val;
-                Object.defineProperty(n, "graph", {
-                    configurable: true,
-                    enumerable: true,
-                    get() { return val; },
-                    set(v) {
-                        if (!v && val) {
-                            console.error(`${LOG} [PROBE-SET] SubgraphNode id=${id} (host=${hostLabel}) .graph nulled. stack:`, new Error().stack);
-                        }
-                        val = v;
-                    },
-                });
-                n.__mirrorGraphProbed = true;
-                if (initialNull) {
-                    console.warn(`${LOG} [PROBE-INIT] SubgraphNode id=${id} (host=${hostLabel}) had .graph=null AT INSTALL TIME (pre-existing)`);
-                }
-                window.__mirrorGraphProbes.push({ node: n, id, hostLabel, restore: () => {
-                    delete n.graph;
-                    n.graph = val;
-                    delete n.__mirrorGraphProbed;
-                }});
-            };
-            const visit = (g, label) => {
-                if (!g || seen.has(g)) return;
-                seen.add(g);
-                for (const n of g._nodes || []) probeOne(n, label);
-                if (g.subgraphs?.values) {
-                    for (const sg of g.subgraphs.values()) visit(sg, `${label}>sg:${sg?.id || "?"}`);
-                }
-            };
-            visit(state.rootGraph, "root");
-            const ids = window.__mirrorGraphProbes.map(p => `${p.id}@${p.hostLabel}`).join(", ");
-            console.log(`${LOG} [PROBE] installed graph setter on ${window.__mirrorGraphProbes.length} SubgraphNode(s). ids: ${ids}`);
-        } catch (e) { console.warn(`${LOG} probe install failed:`, e); }
-
-        // 全局 LGraph.add 钩子：谁把 SubgraphNode 加进任何图都打堆栈
-        try {
-            const LG = (typeof LiteGraph !== "undefined" && LiteGraph?.LGraph) || window.LGraph;
-            const proto = LG?.prototype;
-            if (proto && !proto.__mirrorAddPatched) {
-                const origAdd = proto.add;
-                proto.add = function (n, ...rest) {
-                    if (n?.isSubgraphNode?.()) {
-                        console.error(`${LOG} [PROBE-ADD] SubgraphNode id=${n.id} type=${n.type} added to graph id=${this?.id} name=${this?.constructor?.name}, root?${this===state.rootGraph}, mirror?${this===state.mirrorGraph}. stack:`, new Error().stack);
-                    }
-                    return origAdd.apply(this, [n, ...rest]);
-                };
-                proto.__mirrorAddPatched = true;
-                window.__mirrorRemoveRestore = () => {
-                    proto.add = origAdd;
-                    delete proto.__mirrorAddPatched;
-                };
-            }
-        } catch (e) { console.warn(`${LOG} add probe install failed:`, e); }
-
-        // 监控 rootGraph._nodes 数组变更 (push 和 splice)
-        try {
-            const arr = state.rootGraph?._nodes;
-            if (arr && !arr.__mirrorArrayPatched) {
-                const origPush = arr.push;
-                const origSplice = arr.splice;
-                arr.push = function (...nodes) {
-                    for (const n of nodes) {
-                        if (n?.isSubgraphNode?.()) {
-                            console.error(`${LOG} [PROBE-PUSH] root._nodes.push(SubgraphNode id=${n.id} type=${n.type}). stack:`, new Error().stack);
-                        }
-                    }
-                    return origPush.apply(this, nodes);
-                };
-                arr.splice = function () {
-                    if (arguments.length > 1 && arguments[1] > 0) {
-                        const removed = origSplice.apply(this, arguments);
-                        for (const r of removed) {
-                            if (r?.isSubgraphNode?.()) {
-                                console.error(`${LOG} [PROBE-SPLICE] root._nodes spliced out SubgraphNode id=${r.id}. stack:`, new Error().stack);
-                            }
-                        }
-                        return removed;
-                    }
-                    return origSplice.apply(this, arguments);
-                };
-                arr.__mirrorArrayPatched = true;
-                window.__mirrorSpliceRestore = () => {
-                    arr.push = origPush;
-                    arr.splice = origSplice;
-                    delete arr.__mirrorArrayPatched;
-                };
-            }
-        } catch (e) { console.warn(`${LOG} array probe install failed:`, e); }
-
         const built = buildMirrorGraph();
         if (!built || !built.mirror) {
             console.error(`${LOG} buildMirrorGraph failed`);
@@ -794,7 +648,10 @@ function exitMirrorCleanup({ doSetGraph }) {
                     // 上下文里这条分支条件不可控（会扫到 mirrorGraph 自己的 subgraphs），
                     // 一旦命中就把 root 上原 SubgraphNode 引用的 subgraph 状态打没，
                     // root 画布下次 draw 那个 wrapper 立刻 NullGraphError。
-                    // 手动从 mirror 的 _nodes / _nodes_by_id 摘掉、置 graph=null 即可。
+                    // 不置 graph=null：Vue 反应式时序可能让 clone 出现在 rootGraph._nodes，
+                    // 若 graph=null 则 draw 时 NullGraphError；graph=mirrorGraph 时
+                    // n.rootGraph → mirrorGraph.rootGraph → rootGraph 仍可用，不炸。
+                    // 只从 mirror 的 _nodes / _nodes_by_id 摘掉即可。
                     if (n.isSubgraphNode?.()) {
                         // 不置 graph=null：7678 这类 mirror clone 如果因 Vue 反应式
                         // 时序问题最终出现在 rootGraph._nodes，graph=mirrorGraph 时
@@ -819,29 +676,9 @@ function exitMirrorCleanup({ doSetGraph }) {
         }
     }
 
-    // 诊断：setGraph 前打 root._nodes 里有没有 SubgraphNode 且 graph=null
-    try {
-        const snap = state.rootGraph?._nodes;
-        if (snap) {
-            const bad = snap.filter(n => n?.isSubgraphNode?.() && !n.graph);
-            if (bad.length > 0) {
-                console.error(`${LOG} [PROBE-PRE-SETGRAPH] ${bad.length} root SubgraphNode(s) already have graph=null before setGraph:`, bad.map(n=>n.id));
-            } else {
-                console.log(`${LOG} [PROBE-PRE-SETGRAPH] all root SubgraphNodes have graph, total root._nodes=${snap.length}`);
-            }
-        }
-    } catch (_) {}
-
     if (doSetGraph) {
         try { safeSetGraph(state.rootGraph); }
         catch (e) { console.error(`${LOG} setGraph(root) failed:`, e); return; }
-        // POST-SETGRAPH 检查
-        try {
-            const r = state.rootGraph?._nodes;
-            const bad = r?.filter(n => n?.isSubgraphNode?.() && !n.graph);
-            if (bad?.length) console.error(`${LOG} [PROBE-POST-SETGRAPH] ${bad.length} SubgraphNode(s) with graph=null AFTER setGraph:`, bad.map(n=>n.id));
-            else console.log(`${LOG} [PROBE-POST-SETGRAPH] all ok, total=${r?.length}`);
-        } catch(_) {}
     }
 
     const savedDs = state._savedDs;
@@ -882,31 +719,6 @@ function exitMirrorCleanup({ doSetGraph }) {
         requestAnimationFrame(() => restore(0));
     }
     purgeMirrorSubgraphsFrom(state.rootGraph);
-    // POST-PURGE 检查
-    try {
-        const r = state.rootGraph?._nodes;
-        const bad = r?.filter(n => n?.isSubgraphNode?.() && !n.graph);
-        if (bad?.length) console.error(`${LOG} [PROBE-POST-PURGE] ${bad.length} SubgraphNode(s) with graph=null AFTER purge:`, bad.map(n=>n.id));
-        else console.log(`${LOG} [PROBE-POST-PURGE] all ok, total=${r?.length}`);
-    } catch(_) {}
-
-    // 卸探针并报告结果
-    try {
-        const probes = window.__mirrorGraphProbes || [];
-        let nulled = 0;
-        for (const p of probes) {
-            try {
-                if (p.node && !p.node.graph) nulled++;
-                p.restore?.();
-            } catch (_) {}
-        }
-        if (nulled > 0) console.error(`${LOG} [PROBE] ${nulled} root SubgraphNode(s) had graph=null at exit (see earlier stacks)`);
-        window.__mirrorGraphProbes = [];
-        try { window.__mirrorRemoveRestore?.(); window.__mirrorRemoveRestore = null; } catch (_) {}
-        try { window.__mirrorSpliceRestore?.(); window.__mirrorSpliceRestore = null; } catch (_) {}
-        try { window.__mirrorRootGraphRestore?.(); window.__mirrorRootGraphRestore = null; } catch (_) {}
-    } catch (e) { console.warn(`${LOG} probe teardown failed:`, e); }
-
     state.mirrorSubgraphId = null;
     state.mirrorGraph = null;
     state.nodeIdMap = null;
