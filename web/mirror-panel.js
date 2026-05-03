@@ -574,9 +574,53 @@ function switchView(mode) {
         }
 
         // ===== 调试探针 =====
-        // 深度遍历 root + 所有嵌套 subgraph，给每一个 SubgraphNode 实例都装 .graph setter。
-        // rgthree 的 jsnodes.js computeVisibleNodes 是深度遍历的，报错的 SubgraphNode
-        // 可能在嵌套 subgraph 里，只 probe rootGraph._nodes 抓不到。
+        // 深度遍历 + 在 SubgraphNode.prototype 上 wrap rootGraph getter（捕获所有实例）
+        try {
+            // 1) 在 prototype 上拦 rootGraph getter，throw 之前打 id + this 的引用上下文
+            const sample = (state.rootGraph?._nodes || []).find(n => n?.isSubgraphNode?.());
+            if (sample) {
+                const proto = Object.getPrototypeOf(sample);
+                const desc = Object.getOwnPropertyDescriptor(proto, "rootGraph");
+                if (desc && desc.get && !proto.__mirrorRootGraphPatched) {
+                    const origGet = desc.get;
+                    Object.defineProperty(proto, "rootGraph", {
+                        configurable: true,
+                        enumerable: desc.enumerable,
+                        get() {
+                            if (!this.graph) {
+                                console.error(`${LOG} [PROBE-NULLGRAPH] SubgraphNode id=${this.id} type=${this.type} subgraph=${this.subgraph?.id} about to throw. Walking refs...`);
+                                // Find which graph references this node
+                                const root = state.rootGraph;
+                                const checkGraph = (g, path) => {
+                                    if (!g || !g._nodes) return;
+                                    if (g._nodes.includes(this)) {
+                                        console.error(`  found in ${path}._nodes`);
+                                    }
+                                    if (g._nodes_by_id?.[this.id] === this) {
+                                        console.error(`  found in ${path}._nodes_by_id[${this.id}]`);
+                                    }
+                                    if (g.subgraphs?.values) {
+                                        for (const sg of g.subgraphs.values()) {
+                                            checkGraph(sg, `${path}>sg:${sg?.id}`);
+                                        }
+                                    }
+                                };
+                                checkGraph(root, "root");
+                                if (state.mirrorGraph) checkGraph(state.mirrorGraph, "mirror");
+                            }
+                            return origGet.call(this);
+                        },
+                    });
+                    proto.__mirrorRootGraphPatched = true;
+                    window.__mirrorRootGraphRestore = () => {
+                        Object.defineProperty(proto, "rootGraph", desc);
+                        delete proto.__mirrorRootGraphPatched;
+                    };
+                    console.log(`${LOG} [PROBE] patched SubgraphNode.prototype.rootGraph getter`);
+                }
+            }
+        } catch (e) { console.warn(`${LOG} prototype probe failed:`, e); }
+        // 2) 深度遍历 + 实例 graph setter（保留之前的，作为补充信号）
         try {
             window.__mirrorGraphProbes = window.__mirrorGraphProbes || [];
             const seen = new Set();
@@ -822,6 +866,7 @@ function exitMirrorCleanup({ doSetGraph }) {
         window.__mirrorGraphProbes = [];
         try { window.__mirrorRemoveRestore?.(); window.__mirrorRemoveRestore = null; } catch (_) {}
         try { window.__mirrorSpliceRestore?.(); window.__mirrorSpliceRestore = null; } catch (_) {}
+        try { window.__mirrorRootGraphRestore?.(); window.__mirrorRootGraphRestore = null; } catch (_) {}
     } catch (e) { console.warn(`${LOG} probe teardown failed:`, e); }
 
     state.mirrorSubgraphId = null;
