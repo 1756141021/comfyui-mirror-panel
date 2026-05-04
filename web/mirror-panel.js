@@ -262,6 +262,10 @@ function cloneNodeIntoMirror(origNode, mirrorGraph, layout) {
     catch (e) { console.warn(`${LOG} configure failed for id=${origNode.id}:`, e); }
 
     newNode.pos = [layout.x, layout.y];
+    if (layout.w != null && layout.h != null && newNode.size?.length >= 2) {
+        newNode.size[0] = layout.w;
+        newNode.size[1] = layout.h;
+    }
     newNode.__mirrorOrigId = origNode.id;
 
     // 共享原节点所有非结构性对象引用 → 任何把状态藏在 node.X 的自定义 widget
@@ -404,6 +408,48 @@ function cloneNodeIntoMirror(origNode, mirrorGraph, layout) {
         newNode.onRemoved = function () {};
     }
 
+    // 图像/预览节点同步：直接 hook origNode.onExecuted。
+    // 不依赖 api "executed" 事件时序——ComfyUI 自己的 listener 可能比我们的晚注册，
+    // 导致在 api 事件里读 origNode.imgs 时它还未更新。
+    // hook 里：origOnExecuted 跑完后 this.imgs 已经是新的，直接赋给 mNode.imgs，
+    // 再给每张异步加载的图打上 mirror canvas dirty 回调。
+    {
+        const origOnExecuted = origNode.onExecuted;
+        const hadOwn = Object.prototype.hasOwnProperty.call(origNode, "onExecuted");
+        origNode.onExecuted = function (output) {
+            const r = origOnExecuted?.apply(this, arguments);
+            try {
+                if (Array.isArray(this.imgs) && this.imgs.length && this.imgs !== newNode.imgs) {
+                    newNode.imgs = this.imgs;
+                }
+                const imgs = Array.isArray(newNode.imgs) ? newNode.imgs : [];
+                for (const img of imgs) {
+                    if (!(img instanceof HTMLImageElement)) continue;
+                    if (img.complete && img.naturalWidth > 0) {
+                        app.canvas?.setDirty?.(true, true);
+                    } else {
+                        const prev = img.onload;
+                        img.onload = function (...a) {
+                            const r2 = prev?.apply(this, a);
+                            app.canvas?.setDirty?.(true, true);
+                            return r2;
+                        };
+                    }
+                }
+                try { newNode.onExecuted?.(output); } catch (_) {}
+                app.canvas?.setDirty?.(true, true);
+            } catch (_) {}
+            return r;
+        };
+        state.reverseSyncRestorers.push(() => {
+            if (hadOwn) {
+                origNode.onExecuted = origOnExecuted;
+            } else {
+                delete origNode.onExecuted;
+            }
+        });
+    }
+
     return newNode;
 }
 
@@ -503,6 +549,11 @@ function syncMirrorLayoutBack() {
         if (pinned[origId]) {
             pinned[origId].x = mNode.pos[0];
             pinned[origId].y = mNode.pos[1];
+            const sz = mNode.size;
+            if (sz?.length >= 2 && typeof sz[0] === "number" && typeof sz[1] === "number") {
+                pinned[origId].w = sz[0];
+                pinned[origId].h = sz[1];
+            }
         }
     }
 }
@@ -607,7 +658,21 @@ function switchView(mode) {
             state.rootGraph = null;
             return;
         }
-        fitMirrorView();
+        // setGraph 后 Vue/LiteGraph 的响应式更新可能重置 node.size。
+        // 延一帧等更新结束，再把保存的 mirror 尺寸写回去，再 fitMirrorView。
+        requestAnimationFrame(() => {
+            if (state.view !== VIEW_MIRROR || !state.mirrorGraph) return;
+            const pinned = getPinnedMap();
+            for (const mNode of state.mirrorGraph._nodes) {
+                const layout = pinned[mNode.__mirrorOrigId];
+                if (layout?.w != null && layout?.h != null && mNode.size?.length >= 2) {
+                    mNode.size[0] = layout.w;
+                    mNode.size[1] = layout.h;
+                }
+            }
+            fitMirrorView();
+            app.canvas?.setDirty?.(true, true);
+        });
         console.log(`${LOG} entered Mirror (pinned=${pinnedCount})`);
     } else {
         exitMirrorCleanup({ doSetGraph: true });
@@ -1063,8 +1128,40 @@ app.registerExtension({
             api.addEventListener("execution_success", () => {
                 if (state.view === VIEW_MIRROR) syncRootDataToMirror();
             });
-            api.addEventListener("executed", () => {
-                if (state.view === VIEW_MIRROR) syncRootDataToMirror();
+            api.addEventListener("executed", (event) => {
+                if (state.view !== VIEW_MIRROR) return;
+                syncRootDataToMirror();
+                // mirror 模式下 app.graph === mirrorGraph，ComfyUI 找不到 origNode，
+                // 不会调 origNode.onExecuted，origNode.imgs 永远是 undefined。
+                // 直接从 event.detail.output 拿图像数据，自己加载进 mNode.imgs。
+                try {
+                    const detail = event?.detail;
+                    if (detail?.node == null || !state.mirrorGraph) return;
+                    const eventNodeId = Number(detail.node);
+                    const output = detail.output;
+                    if (!output) return;
+                    for (const mNode of state.mirrorGraph._nodes) {
+                        if (mNode.__mirrorOrigId !== eventNodeId) continue;
+                        // widget 路径（SimpleImageCompare 等）
+                        try { mNode.onExecuted?.(output); } catch (_) {}
+                        // node.imgs 路径（PreviewImage 等）
+                        if (Array.isArray(output.images) && output.images.length) {
+                            const imgs = [];
+                            for (const imgData of output.images) {
+                                const url = api.apiURL(
+                                    `/view?filename=${encodeURIComponent(imgData.filename)}&type=${imgData.type}&subfolder=${encodeURIComponent(imgData.subfolder || "")}`
+                                );
+                                const img = new Image();
+                                img.onload = () => app.canvas?.setDirty?.(true, true);
+                                img.src = url;
+                                imgs.push(img);
+                            }
+                            mNode.imgs = imgs;
+                        }
+                        app.canvas?.setDirty?.(true, true);
+                        break;
+                    }
+                } catch (_) {}
             });
             state.apiListenerInstalled = true;
         }

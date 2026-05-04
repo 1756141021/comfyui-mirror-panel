@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## 1.0.6
+
+修：mirror 视图下节点大小（size）退出重进后被重置。
+
+根因：`syncMirrorLayoutBack` 用 `Array.isArray(mNode.size)` 检测大小，但 LiteGraph 的 `node.size` 是 `Float32Array`，不是普通数组，导致保存从未执行，`pinned[origId].w/h` 始终 null，恢复时无值可用。
+
+修法：改用 `sz?.length >= 2 && typeof sz[0] === "number"` 检测；恢复时 in-place 写入（`mNode.size[0] = w`）而非替换引用（避免 Float32Array 引用被覆盖）；`setGraph` 后延一帧再次应用尺寸（防 Vue 响应式更新覆盖）。
+
+修：mirror 视图下图像/预览节点（PreviewImage 等）执行后不实时更新。
+
+根因：mirror 模式下 `canvas.graph === mirrorGraph`，ComfyUI 用 `app.graph.getNodeById` 查节点，在 mirrorGraph 里找不到 origNode（id 不同），故 `origNode.onExecuted` 从不被调用，`origNode.imgs` 永远是旧值。
+
+修法：在 `executed` API 事件里直接从 `event.detail.output` 取图像数据，自己加载进 `mNode.imgs`，img.onload 后触发 mirror canvas dirty；同时转发 `mNode.onExecuted(output)`（兼容 SimpleImageCompare 等 widget 路径节点）。
+
 ## 1.0.5
 
 修：pin SubgraphNode（subgraph 包装节点）后退出 mirror 时 `NullGraphError: SubgraphNode N has no graph`。
