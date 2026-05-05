@@ -26,7 +26,8 @@ const VIEW_MIRROR = "mirror";
 const SUBGRAPH_NAME = "Mirror Panel";
 
 // ---------- 视觉分区 (VG) ----------
-const VG_TITLE_H = 28;
+const VG_FONT_SIZE = 24;                        // 与 LGraphGroup 默认字号一致
+const VG_TITLE_H = Math.ceil(VG_FONT_SIZE * 1.4); // ~34px，与 LGraphGroup 一致
 const VG_COLORS = ["#558ef0", "#55aa55", "#e05050", "#e0a050", "#9955aa", "#50a0a0"];
 const _vg = { groups: [] }; // 仅 mirror 视图期间有数据
 
@@ -662,22 +663,27 @@ function saveVGGroups() {
 }
 
 function drawVGGroups(ctx) {
+    const ea = app.canvas?.editor_alpha ?? 1;
     for (const g of _vg.groups) {
         ctx.save();
-        ctx.globalAlpha = 0.6;
+        // 标题栏填充（同 LGraphGroup：25% alpha）
+        ctx.globalAlpha = 0.25 * ea;
         ctx.fillStyle = g.color;
-        ctx.fillRect(g.x, g.y, g.w, VG_TITLE_H);
-        ctx.globalAlpha = 0.12;
+        ctx.fillRect(g.x + 0.5, g.y + 0.5, g.w, VG_TITLE_H);
+        // 主体填充（同 LGraphGroup：25% alpha）
+        ctx.globalAlpha = 0.25 * ea;
         ctx.fillStyle = g.color;
-        ctx.fillRect(g.x, g.y + VG_TITLE_H, g.w, g.h - VG_TITLE_H);
-        ctx.globalAlpha = 0.7;
+        ctx.fillRect(g.x + 0.5, g.y + 0.5 + VG_TITLE_H, g.w, g.h - VG_TITLE_H);
+        // 边框（同 LGraphGroup：80% alpha）
+        ctx.globalAlpha = 0.8 * ea;
         ctx.strokeStyle = g.color;
         ctx.lineWidth = 1;
-        ctx.strokeRect(g.x + 0.5, g.y + 0.5, g.w, g.h);
-        ctx.globalAlpha = 1;
-        ctx.fillStyle = "#fff";
-        ctx.font = `bold 14px sans-serif`;
-        ctx.fillText(g.title, g.x + 8, g.y + VG_TITLE_H - 8);
+        ctx.strokeRect(g.x - 0.5, g.y - 0.5, g.w + 1, g.h + 1);
+        // 标题文字（同 LGraphGroup：group color，24px bold Arial）
+        ctx.globalAlpha = 1.0 * ea;
+        ctx.fillStyle = g.color;
+        ctx.font = `bold ${VG_FONT_SIZE}px Arial`;
+        ctx.fillText(g.title, g.x + 4, g.y + VG_FONT_SIZE);
         ctx.restore();
     }
 }
