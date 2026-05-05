@@ -666,24 +666,24 @@ function drawVGGroups(ctx) {
     const ea = app.canvas?.editor_alpha ?? 1;
     for (const g of _vg.groups) {
         ctx.save();
-        // 标题栏填充（同 LGraphGroup：25% alpha）
-        ctx.globalAlpha = 0.25 * ea;
+        // 标题栏：不透明实色填充，与背景区做出区别
+        ctx.globalAlpha = ea;
         ctx.fillStyle = g.color;
         ctx.fillRect(g.x + 0.5, g.y + 0.5, g.w, VG_TITLE_H);
-        // 主体填充（同 LGraphGroup：25% alpha）
+        // 主体：半透明填充
         ctx.globalAlpha = 0.25 * ea;
         ctx.fillStyle = g.color;
         ctx.fillRect(g.x + 0.5, g.y + 0.5 + VG_TITLE_H, g.w, g.h - VG_TITLE_H);
-        // 边框（同 LGraphGroup：80% alpha）
+        // 边框
         ctx.globalAlpha = 0.8 * ea;
         ctx.strokeStyle = g.color;
         ctx.lineWidth = 1;
         ctx.strokeRect(g.x - 0.5, g.y - 0.5, g.w + 1, g.h + 1);
-        // 标题文字（同 LGraphGroup：group color，24px bold Arial）
-        ctx.globalAlpha = 1.0 * ea;
-        ctx.fillStyle = g.color;
+        // 标题文字：白色（标题栏不透明，用白字对比）
+        ctx.globalAlpha = ea;
+        ctx.fillStyle = "#fff";
         ctx.font = `bold ${VG_FONT_SIZE}px Arial`;
-        ctx.fillText(g.title, g.x + 4, g.y + VG_FONT_SIZE);
+        ctx.fillText(g.title, g.x + 8, g.y + VG_FONT_SIZE);
         ctx.restore();
     }
 }
@@ -700,7 +700,7 @@ function createVG(gx, gy) {
     const nodes = Object.values(app.canvas.selected_nodes || {});
     let x, y, w, h;
     if (nodes.length) {
-        const PAD = 24;
+        const PAD = 36;
         let mnX = Infinity, mnY = Infinity, mxX = -Infinity, mxY = -Infinity;
         for (const n of nodes) {
             mnX = Math.min(mnX, n.pos[0]); mnY = Math.min(mnY, n.pos[1]);
