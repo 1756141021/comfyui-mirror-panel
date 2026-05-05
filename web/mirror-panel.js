@@ -1229,6 +1229,18 @@ function hijackCanvasVGMenu() {
             options.push(null);
             if (hit) {
                 options.push({ content: `重命名「${hit.title}」`, callback: () => renameVG(hit) });
+                const COLOR_NAMES = ["蓝", "绿", "红", "橙", "紫", "青"];
+                options.push({
+                    content: "更改颜色",
+                    has_submenu: true,
+                    callback: function (_v, _opts, e, menu) {
+                        const colorItems = VG_COLORS.map((c, i) => ({
+                            content: COLOR_NAMES[i] || c,
+                            callback: () => { hit.color = c; saveVGGroups(); app.canvas.setDirty?.(true, true); },
+                        }));
+                        new LiteGraph.ContextMenu(colorItems, { event: e, parentMenu: menu });
+                    },
+                });
                 options.push({ content: `删除「${hit.title}」`, callback: () => deleteVG(hit) });
             }
             options.push({ content: "新建视觉分区", callback: () => createVG(gx, gy) });
