@@ -298,6 +298,15 @@ function cloneNodeIntoMirror(origNode, mirrorGraph, layout) {
         // 导致 refreshColorFilter 等 DOM 更新打到 orig 的 element 上而非 clone 的。
         "customUI", "element",
     ]);
+    // 在共享 properties 引用之前拍快照，退出 mirror 时原样还原。
+    // Danbooru Gallery 的 Vue 组件在 mirror 初始化期间会往 node.properties 写
+    // 显示状态标记（如 _sectionCollapsed / _sectionStyle 等），因为 properties 是
+    // 共享引用，这些写入会透传到 origNode，导致退出后 canvas 渲染丢失渐变样式。
+    let _origPropsSnapshot = null;
+    if (origNode.properties && typeof origNode.properties === "object") {
+        try { _origPropsSnapshot = JSON.parse(JSON.stringify(origNode.properties)); } catch (_) {}
+    }
+
     for (const key of Object.keys(origNode)) {
         if (STRUCTURAL_KEYS.has(key)) continue;
         if (key.startsWith("_") && key !== "_widgets_values") continue;
@@ -477,6 +486,31 @@ function cloneNodeIntoMirror(origNode, mirrorGraph, layout) {
                 origNode.onExecuted = origOnExecuted;
             } else {
                 delete origNode.onExecuted;
+            }
+        });
+    }
+
+    // properties 快照还原：把 origNode.properties 原地写回快照值。
+    // 用 in-place 方式而非替换引用，保持 Vue 响应式绑定。
+    // 同时在 setGraph(rootGraph) 完成后异步触发 updateParametersList，
+    // 确保 DOM widget 重新挂载后以正确数据渲染（vue re-render 后 customUI 可能是新元素）。
+    if (_origPropsSnapshot !== null) {
+        state.reverseSyncRestorers.push(() => {
+            const p = origNode.properties;
+            if (!p || typeof p !== "object") return;
+            try {
+                for (const k of Object.keys(p)) {
+                    if (!(k in _origPropsSnapshot)) delete p[k];
+                }
+                Object.assign(p, _origPropsSnapshot);
+            } catch (_) {}
+            // setGraph 之后异步重绘，让 DOM widget 以正确数据渲染
+            if (typeof origNode.updateParametersList === "function") {
+                setTimeout(() => {
+                    try {
+                        if (origNode.graph) origNode.updateParametersList();
+                    } catch (_) {}
+                }, 0);
             }
         });
     }
@@ -846,6 +880,14 @@ function exitMirrorCleanup({ doSetGraph }) {
         if (needTempSwap) {
             try { safeSetGraph(state.mirrorGraph); } catch (_) {}
         }
+        // 某些插件（如 Danbooru Gallery PCP）的 onRemoved 会在"图里没有同类节点"时
+        // 删除全局 <style> 元素（如 #pcp-styles）。mirror clone 的 onRemoved 触发时
+        // this.graph._nodes 是 mirrorGraph 的节点，不含 rootGraph 里的原节点，
+        // 所以它会认为"没有其他同类节点"并删掉全局样式 → 退出 mirror 后原节点渐变线消失。
+        // 修法：移除 mirror 节点前把所有 <style>/<link> 快照，移除后补回丢失的。
+        const _savedStyles = Array.from(document.head.querySelectorAll('style[id],link[rel="stylesheet"][id]'))
+            .map(el => ({ id: el.id, tag: el.tagName.toLowerCase(), content: el.textContent, href: el.href }));
+
         state._suppressUnpin = true;
         try {
             const nodesCopy = [...state.mirrorGraph._nodes];
@@ -897,6 +939,18 @@ function exitMirrorCleanup({ doSetGraph }) {
             }
         } finally {
             state._suppressUnpin = false;
+        }
+        // 补回被 onRemoved 删掉的全局样式
+        for (const s of _savedStyles) {
+            if (s.id && !document.getElementById(s.id)) {
+                try {
+                    const el = document.createElement(s.tag);
+                    el.id = s.id;
+                    if (s.tag === 'style') el.textContent = s.content;
+                    else if (s.tag === 'link') { el.rel = 'stylesheet'; el.href = s.href; }
+                    document.head.appendChild(el);
+                } catch (_) {}
+            }
         }
         if (needTempSwap) {
             try { safeSetGraph(state.rootGraph); } catch (_) {}

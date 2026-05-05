@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 1.0.9
+
+修：退出 mirror 后 Danbooru Gallery 参数控制面板（ParameterControlPanel）的分区标题渐变线消失。
+
+根因：PCP 节点的 `onRemoved` 里有一段"最后一个同类节点退出时删全局 CSS"的逻辑，用 `this.graph._nodes` 判断是否还有其他 PCP 节点。mirror clone 被 `mirrorGraph.remove()` 时，`this.graph` 是 mirrorGraph，`_nodes` 里只有 mirror clones，rootGraph 里的原节点对它不可见，每次都触发"无同类节点"分支，把 `#pcp-styles` 从 `<head>` 里删掉，渐变线 CSS 全部失效。
+
+修法：删 mirror 节点循环前，把 `document.head` 里所有有 `id` 的 `<style>` / `<link>` 快照；循环结束后补回丢失的元素。
+
+同时：退出时原地还原 `origNode.properties` 快照（防共享引用污染），并异步触发 `updateParametersList` 重绘参数列表。
+
 ## 1.0.8
 
 新增：mirror 视图里的纯视觉分区（Visual Group）。
