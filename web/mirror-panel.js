@@ -700,7 +700,7 @@ function createVG(gx, gy) {
     const nodes = Object.values(app.canvas.selected_nodes || {});
     let x, y, w, h;
     if (nodes.length) {
-        const PAD = 36;
+        const PAD = 48;
         let mnX = Infinity, mnY = Infinity, mxX = -Infinity, mxY = -Infinity;
         for (const n of nodes) {
             mnX = Math.min(mnX, n.pos[0]); mnY = Math.min(mnY, n.pos[1]);
