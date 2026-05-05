@@ -1229,16 +1229,21 @@ function hijackCanvasVGMenu() {
             options.push(null);
             if (hit) {
                 options.push({ content: `重命名「${hit.title}」`, callback: () => renameVG(hit) });
-                const COLOR_NAMES = ["蓝", "绿", "红", "橙", "紫", "青"];
                 options.push({
                     content: "更改颜色",
-                    has_submenu: true,
-                    callback: function (_v, _opts, e, menu) {
-                        const colorItems = VG_COLORS.map((c, i) => ({
-                            content: COLOR_NAMES[i] || c,
-                            callback: () => { hit.color = c; saveVGGroups(); app.canvas.setDirty?.(true, true); },
-                        }));
-                        new LiteGraph.ContextMenu(colorItems, { event: e, parentMenu: menu });
+                    callback: () => {
+                        const inp = document.createElement("input");
+                        inp.type = "color";
+                        inp.value = hit.color;
+                        inp.style.cssText = "position:fixed;opacity:0;pointer-events:none";
+                        document.body.appendChild(inp);
+                        inp.addEventListener("input", () => {
+                            hit.color = inp.value;
+                            saveVGGroups();
+                            app.canvas.setDirty?.(true, true);
+                        });
+                        inp.addEventListener("change", () => { document.body.removeChild(inp); });
+                        inp.click();
                     },
                 });
                 options.push({ content: `删除「${hit.title}」`, callback: () => deleteVG(hit) });
