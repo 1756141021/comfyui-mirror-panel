@@ -666,24 +666,20 @@ function drawVGGroups(ctx) {
     const ea = app.canvas?.editor_alpha ?? 1;
     for (const g of _vg.groups) {
         ctx.save();
-        // 标题栏：不透明实色填充，与背景区做出区别
-        ctx.globalAlpha = ea;
-        ctx.fillStyle = g.color;
-        ctx.fillRect(g.x + 0.5, g.y + 0.5, g.w, VG_TITLE_H);
-        // 主体：半透明填充
+        // 整体半透明填充（与原版 LGraphGroup 一致）
         ctx.globalAlpha = 0.25 * ea;
         ctx.fillStyle = g.color;
-        ctx.fillRect(g.x + 0.5, g.y + 0.5 + VG_TITLE_H, g.w, g.h - VG_TITLE_H);
+        ctx.fillRect(g.x + 0.5, g.y + 0.5, g.w, g.h);
         // 边框
         ctx.globalAlpha = 0.8 * ea;
         ctx.strokeStyle = g.color;
         ctx.lineWidth = 1;
         ctx.strokeRect(g.x - 0.5, g.y - 0.5, g.w + 1, g.h + 1);
-        // 标题文字：白色（标题栏不透明，用白字对比）
+        // 标题文字：组颜色（与原版 LGraphGroup 一致）
         ctx.globalAlpha = ea;
-        ctx.fillStyle = "#fff";
+        ctx.fillStyle = g.color;
         ctx.font = `bold ${VG_FONT_SIZE}px Arial`;
-        ctx.fillText(g.title, g.x + 8, g.y + VG_FONT_SIZE);
+        ctx.fillText(g.title, g.x + 4, g.y + VG_FONT_SIZE);
         ctx.restore();
     }
 }
