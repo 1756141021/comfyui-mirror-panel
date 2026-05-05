@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-mirror-panel"
-version = "1.0.6"
+version = "1.0.7"
 description = "Pin nodes to a Mirror view backed by a clone graph: edit only what matters, original workflow untouched, subgraph-level performance."
 requires-python = ">=3.9"
 license = { text = "GPL-3.0-or-later" }

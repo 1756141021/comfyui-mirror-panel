@@ -1,4 +1,4 @@
-// ComfyUI Mirror Panel — v0.4.0
+// ComfyUI Mirror Panel — v1.0.7
 // 架构：clone-based mirror graph。rootGraph 完全不动。
 //
 //   - Pin 节点：graph.extra.mirrorPanel.pinned[node.id] = { x, y, title }
@@ -408,6 +408,28 @@ function cloneNodeIntoMirror(origNode, mirrorGraph, layout) {
         newNode.onRemoved = function () {};
     }
 
+    // 节点用后端 key-value（如 ParameterControlPanel 的 _node_configs[node_id]）
+    // 存运行时参数值：properties 已共享，但 syncConfig() 用 this.id 写后端，
+    // mirror clone 的 id 不同于原节点，执行时读原节点 id 的 config → 拿到旧值。
+    // 把 clone 的 syncConfig 重定向到 origNode.syncConfig：
+    // properties 是共享引用，origNode 拿到的参数永远是 mirror 改完的最新值。
+    if (typeof newNode.syncConfig === "function" && typeof origNode.syncConfig === "function") {
+        newNode.syncConfig = function (...args) {
+            return origNode.syncConfig.apply(origNode, args);
+        };
+    }
+
+    // ParameterControlPanel 的 refreshAllDropdownsOnWorkflowLoad / recheckFromConnectionDropdowns
+    // 在 onConfigure 里触发：它们沿 output 连接找 ParameterBreak 节点，但 mirror clone 的
+    // outputs 链接已被清空，找不到就弹 toast 警告。mirror 里没有拓扑连接，这两个刷新
+    // 对 clone 毫无意义，设成 noop 消除噪音。
+    if (typeof newNode.refreshAllDropdownsOnWorkflowLoad === "function") {
+        newNode.refreshAllDropdownsOnWorkflowLoad = function () {};
+    }
+    if (typeof newNode.recheckFromConnectionDropdowns === "function") {
+        newNode.recheckFromConnectionDropdowns = function () {};
+    }
+
     // 图像/预览节点同步：直接 hook origNode.onExecuted。
     // 不依赖 api "executed" 事件时序——ComfyUI 自己的 listener 可能比我们的晚注册，
     // 导致在 api 事件里读 origNode.imgs 时它还未更新。
@@ -436,7 +458,10 @@ function cloneNodeIntoMirror(origNode, mirrorGraph, layout) {
                         };
                     }
                 }
-                try { newNode.onExecuted?.(output); } catch (_) {}
+                const hasImgOut = output?.images || output?.a_images || output?.b_images;
+                if (hasImgOut) {
+                    try { newNode.onExecuted?.(output); } catch (_) {}
+                }
                 app.canvas?.setDirty?.(true, true);
             } catch (_) {}
             return r;
@@ -646,6 +671,17 @@ function switchView(mode) {
         state.mirrorGraph = built.mirror;
         state.nodeIdMap = built.idMap;
 
+        // canvas groups 在 mirror 视图里只有视觉干扰，没有操作意义。
+        // _groups 数据保持共享引用不变（Danbooru 组管理器读 app.graph._groups 仍正常），
+        // 只把渲染关掉。
+        if (typeof app.canvas?.drawGroups === "function") {
+            const origDrawGroups = app.canvas.drawGroups;
+            app.canvas.drawGroups = function () {};
+            state.reverseSyncRestorers.push(() => {
+                app.canvas.drawGroups = origDrawGroups;
+            });
+        }
+
         try { safeSetGraph(state.mirrorGraph); }
         catch (e) {
             console.error(`${LOG} setGraph(mirror) failed:`, e);
@@ -686,6 +722,8 @@ function switchView(mode) {
 // doSetGraph=false 用于"已经被外部切走"，避免重复 setGraph
 function exitMirrorCleanup({ doSetGraph }) {
     if (!state.rootGraph) return;
+
+
 
     syncMirrorDataToRoot();
     syncMirrorLayoutBack();
@@ -1142,8 +1180,13 @@ app.registerExtension({
                     if (!output) return;
                     for (const mNode of state.mirrorGraph._nodes) {
                         if (mNode.__mirrorOrigId !== eventNodeId) continue;
-                        // widget 路径（SimpleImageCompare 等）
-                        try { mNode.onExecuted?.(output); } catch (_) {}
+                        // onExecuted 只转发给有图像输出的节点（SimpleImageCompare、PreviewImage 等）
+                        // 非图像节点（LoRA Manager 等）调 onExecuted 会从 root 重新同步状态，
+                        // 把用户在 mirror 里改的值覆盖回去。
+                        const hasImageOutput = output.images || output.a_images || output.b_images;
+                        if (hasImageOutput) {
+                            try { mNode.onExecuted?.(output); } catch (_) {}
+                        }
                         // node.imgs 路径（PreviewImage 等）
                         if (Array.isArray(output.images) && output.images.length) {
                             const imgs = [];

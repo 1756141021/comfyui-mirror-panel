@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 1.0.7
+
+修：mirror 视图里能看到 canvas 的组（颜色分区框），操作上没用，还会跟 mirror 里的卡片视觉冲突。
+
+在进入 mirror 时覆盖 `canvas.drawGroups` 为 noop，退出时还原。`mirrorGraph._groups` 仍是 `rootGraph._groups` 的共享引用，Danbooru 组管理器读 `app.graph._groups` 正常，只有渲染层被屏蔽。
+
 ## 1.0.6
 
 修：mirror 视图下节点大小（size）退出重进后被重置。
