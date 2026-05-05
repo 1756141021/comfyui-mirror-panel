@@ -1,4 +1,4 @@
-// ComfyUI Mirror Panel — v1.0.7
+// ComfyUI Mirror Panel — v1.0.8
 // 架构：clone-based mirror graph。rootGraph 完全不动。
 //
 //   - Pin 节点：graph.extra.mirrorPanel.pinned[node.id] = { x, y, title }
@@ -24,6 +24,11 @@ const LOG = "[MirrorPanel]";
 const VIEW_CANVAS = "canvas";
 const VIEW_MIRROR = "mirror";
 const SUBGRAPH_NAME = "Mirror Panel";
+
+// ---------- 视觉分区 (VG) ----------
+const VG_TITLE_H = 28;
+const VG_COLORS = ["#558ef0", "#55aa55", "#e05050", "#e0a050", "#9955aa", "#50a0a0"];
+const _vg = { groups: [] }; // 仅 mirror 视图期间有数据
 
 const state = {
     view: VIEW_CANVAS,
@@ -642,6 +647,91 @@ function syncRootDataToMirror() {
     }
 }
 
+// ---------- 视觉分区函数 ----------
+
+function loadVGGroups() {
+    const saved = state.rootGraph?.extra?.mirrorPanel?.vgroups || [];
+    _vg.groups = saved.map(d => ({ ...d }));
+}
+
+function saveVGGroups() {
+    if (!state.rootGraph) return;
+    if (!state.rootGraph.extra) state.rootGraph.extra = {};
+    if (!state.rootGraph.extra.mirrorPanel) state.rootGraph.extra.mirrorPanel = {};
+    state.rootGraph.extra.mirrorPanel.vgroups = _vg.groups.map(g => ({ ...g }));
+}
+
+function drawVGGroups(ctx) {
+    for (const g of _vg.groups) {
+        ctx.save();
+        ctx.globalAlpha = 0.6;
+        ctx.fillStyle = g.color;
+        ctx.fillRect(g.x, g.y, g.w, VG_TITLE_H);
+        ctx.globalAlpha = 0.12;
+        ctx.fillStyle = g.color;
+        ctx.fillRect(g.x, g.y + VG_TITLE_H, g.w, g.h - VG_TITLE_H);
+        ctx.globalAlpha = 0.7;
+        ctx.strokeStyle = g.color;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(g.x + 0.5, g.y + 0.5, g.w, g.h);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "#fff";
+        ctx.font = `bold 14px sans-serif`;
+        ctx.fillText(g.title, g.x + 8, g.y + VG_TITLE_H - 8);
+        ctx.restore();
+    }
+}
+
+function vgAtPos(gx, gy) {
+    for (const g of _vg.groups) {
+        if (gx >= g.x && gx <= g.x + g.w && gy >= g.y && gy <= g.y + g.h)
+            return g;
+    }
+    return null;
+}
+
+function createVG(gx, gy) {
+    const nodes = Object.values(app.canvas.selected_nodes || {});
+    let x, y, w, h;
+    if (nodes.length) {
+        const PAD = 24;
+        let mnX = Infinity, mnY = Infinity, mxX = -Infinity, mxY = -Infinity;
+        for (const n of nodes) {
+            mnX = Math.min(mnX, n.pos[0]); mnY = Math.min(mnY, n.pos[1]);
+            mxX = Math.max(mxX, n.pos[0] + (n.size?.[0] || 200));
+            mxY = Math.max(mxY, n.pos[1] + (n.size?.[1] || 100));
+        }
+        x = mnX - PAD; y = mnY - PAD - VG_TITLE_H;
+        w = (mxX - mnX) + PAD * 2; h = (mxY - mnY) + PAD * 2 + VG_TITLE_H;
+    } else {
+        x = gx - 150; y = gy - 50; w = 300; h = 200;
+    }
+    const title = prompt("分区名称", "新分区");
+    if (title === null) return;
+    _vg.groups.push({
+        id: `vg-${Date.now()}`,
+        x, y, w, h, title,
+        color: VG_COLORS[_vg.groups.length % VG_COLORS.length],
+    });
+    saveVGGroups();
+    app.canvas.setDirty?.(true, true);
+}
+
+function renameVG(g) {
+    const title = prompt("重命名分区", g.title);
+    if (title === null) return;
+    g.title = title;
+    saveVGGroups();
+    app.canvas.setDirty?.(true, true);
+}
+
+function deleteVG(g) {
+    const idx = _vg.groups.indexOf(g);
+    if (idx >= 0) _vg.groups.splice(idx, 1);
+    saveVGGroups();
+    app.canvas.setDirty?.(true, true);
+}
+
 // ---------- 视图切换 ----------
 
 function switchView(mode) {
@@ -662,6 +752,8 @@ function switchView(mode) {
             };
         }
 
+        loadVGGroups();
+
         const built = buildMirrorGraph();
         if (!built || !built.mirror) {
             console.error(`${LOG} buildMirrorGraph failed`);
@@ -676,7 +768,11 @@ function switchView(mode) {
         // 只把渲染关掉。
         if (typeof app.canvas?.drawGroups === "function") {
             const origDrawGroups = app.canvas.drawGroups;
-            app.canvas.drawGroups = function () {};
+            app.canvas.drawGroups = function (_canvas, ctx) {
+                // root 组不画（_groups 是共享引用，画了会干扰 mirror 视图）
+                // 只画独立的 VG 分区
+                drawVGGroups(ctx);
+            };
             state.reverseSyncRestorers.push(() => {
                 app.canvas.drawGroups = origDrawGroups;
             });
@@ -724,6 +820,9 @@ function exitMirrorCleanup({ doSetGraph }) {
     if (!state.rootGraph) return;
 
 
+
+    saveVGGroups();
+    _vg.groups = [];
 
     syncMirrorDataToRoot();
     syncMirrorLayoutBack();
@@ -1113,6 +1212,35 @@ function hijackCanvasMenu() {
     return true;
 }
 
+function hijackCanvasVGMenu() {
+    const LGCanvas =
+        (typeof LiteGraph !== "undefined" ? LiteGraph?.LGraphCanvas : null) ||
+        window.LGraphCanvas ||
+        app.canvas?.constructor;
+    if (!LGCanvas?.prototype) return false;
+    if (LGCanvas.prototype.__mirrorVGMenuHooked) return false;
+    const orig = LGCanvas.prototype.getMenuOptions;
+    LGCanvas.prototype.getMenuOptions = function () {
+        const options = orig ? orig.apply(this, arguments) : [];
+        if (state.view !== VIEW_MIRROR) return options;
+        try {
+            const [gx, gy] = this.graph_mouse || [0, 0];
+            const hit = vgAtPos(gx, gy);
+            options.push(null);
+            if (hit) {
+                options.push({ content: `重命名「${hit.title}」`, callback: () => renameVG(hit) });
+                options.push({ content: `删除「${hit.title}」`, callback: () => deleteVG(hit) });
+            }
+            options.push({ content: "新建视觉分区", callback: () => createVG(gx, gy) });
+        } catch (e) {
+            console.warn(`${LOG} VG menu hook error:`, e);
+        }
+        return options;
+    };
+    LGCanvas.prototype.__mirrorVGMenuHooked = true;
+    return true;
+}
+
 // ---------- 入口 ----------
 
 app.registerExtension({
@@ -1130,6 +1258,7 @@ app.registerExtension({
         injectStyles();
         const ok = hijackCanvasMenu();
         console.log(`${LOG} canvas menu hook: ${ok ? "ok" : "skipped"}`);
+        hijackCanvasVGMenu();
         // 拦截外部 setGraph（ComfyUI 面包屑、第三方导航等）→ 自动跑退出清理
         hijackCanvasSetGraph();
 

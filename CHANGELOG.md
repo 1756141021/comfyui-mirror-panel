@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 1.0.8
+
+新增：mirror 视图里的纯视觉分区（Visual Group）。
+
+在 mirror 视图右键空白处 → "新建视觉分区"，可创建彩色矩形标签。选中节点后新建会自动包围所选节点。右键已有分区区域可重命名或删除。分区数据存入 `graph.extra.mirrorPanel.vgroups`，随 workflow JSON 持久化。
+
+设计约束：不拦截任何鼠标事件；不修改 `mirrorGraph._groups`（保持与 rootGraph 的共享引用，Danbooru 组管理器不受影响）；仅在 mirror 视图可见。
+
 ## 1.0.7
 
 修：mirror 视图里能看到 canvas 的组（颜色分区框），操作上没用，还会跟 mirror 里的卡片视觉冲突。
