@@ -854,11 +854,15 @@ function exitMirrorCleanup({ doSetGraph }) {
                     // 已知的第三方插件清理钩子（ComfyUI-Prompt-Assistant 等）
                     try { window.imageCaption?.cleanup?.(n.id, true); } catch (_) {}
                     try { window.promptAssistant?.cleanup?.(n.id, true); } catch (_) {}
-                    // 触发自定义 widget 的 onRemove
+                    // mirror clone 的 DOM widget 清理：只移除 DOM 元素，不调 w.onRemove()。
+                    // w.onRemove() 在某些插件（如 Danbooru Gallery）里会清理共享对象引用，
+                    // 顺带把原节点的 UI 打掉。直接 detach 元素是安全的。
                     if (Array.isArray(n.widgets)) {
                         const widgets = [...n.widgets];
                         for (const w of widgets) {
-                            try { w.onRemove?.(); } catch (_) {}
+                            try {
+                                if (w.element?.parentNode) w.element.parentNode.removeChild(w.element);
+                            } catch (_) {}
                         }
                         n.widgets.length = 0;
                     }
