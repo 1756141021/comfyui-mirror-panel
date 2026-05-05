@@ -666,10 +666,14 @@ function drawVGGroups(ctx) {
     const ea = app.canvas?.editor_alpha ?? 1;
     for (const g of _vg.groups) {
         ctx.save();
-        // 整体半透明填充（与原版 LGraphGroup 一致）
-        ctx.globalAlpha = 0.25 * ea;
+        // 标题栏：较深半透明，和原版 LGraphGroup 一致
+        ctx.globalAlpha = 0.5 * ea;
         ctx.fillStyle = g.color;
-        ctx.fillRect(g.x + 0.5, g.y + 0.5, g.w, g.h);
+        ctx.fillRect(g.x + 0.5, g.y + 0.5, g.w, VG_TITLE_H);
+        // 主体：浅半透明
+        ctx.globalAlpha = 0.15 * ea;
+        ctx.fillStyle = g.color;
+        ctx.fillRect(g.x + 0.5, g.y + 0.5 + VG_TITLE_H, g.w, g.h - VG_TITLE_H);
         // 边框
         ctx.globalAlpha = 0.8 * ea;
         ctx.strokeStyle = g.color;
