@@ -700,18 +700,17 @@ function createVG(gx, gy) {
     const nodes = Object.values(app.canvas.selected_nodes || {});
     let x, y, w, h;
     if (nodes.length) {
-        const PAD = 10; // 和原版 LGraphGroup 一致：只留很小的侧边/底部间隔
+        const PAD = 24;
         let mnX = Infinity, mnY = Infinity, mxX = -Infinity, mxY = -Infinity;
         for (const n of nodes) {
             mnX = Math.min(mnX, n.pos[0]); mnY = Math.min(mnY, n.pos[1]);
             mxX = Math.max(mxX, n.pos[0] + (n.size?.[0] || 200));
             mxY = Math.max(mxY, n.pos[1] + (n.size?.[1] || 100));
         }
-        // 标题栏紧贴节点上方，与原版 LGraphGroup 行为相同
         x = mnX - PAD;
-        y = mnY - VG_TITLE_H;
+        y = mnY - PAD - VG_TITLE_H;
         w = (mxX - mnX) + PAD * 2;
-        h = (mxY - mnY) + VG_TITLE_H + PAD;
+        h = (mxY - mnY) + PAD * 2 + VG_TITLE_H;
     } else {
         x = gx - 200; y = gy - 100; w = 400; h = 300;
     }
