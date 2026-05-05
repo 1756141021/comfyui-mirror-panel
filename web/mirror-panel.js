@@ -697,26 +697,11 @@ function vgAtPos(gx, gy) {
 }
 
 function createVG(gx, gy) {
-    const nodes = Object.values(app.canvas.selected_nodes || {});
-    let x, y, w, h;
-    if (nodes.length) {
-        const PAD = 24;
-        let mnX = Infinity, mnY = Infinity, mxX = -Infinity, mxY = -Infinity;
-        for (const n of nodes) {
-            mnX = Math.min(mnX, n.pos[0]); mnY = Math.min(mnY, n.pos[1]);
-            mxX = Math.max(mxX, n.pos[0] + (n.size?.[0] || 200));
-            mxY = Math.max(mxY, n.pos[1] + (n.size?.[1] || 100));
-        }
-        x = mnX - PAD; y = mnY - PAD - VG_TITLE_H;
-        w = (mxX - mnX) + PAD * 2; h = (mxY - mnY) + PAD * 2 + VG_TITLE_H;
-    } else {
-        x = gx - 150; y = gy - 50; w = 300; h = 200;
-    }
     const title = prompt("分区名称", "新分区");
     if (title === null) return;
     _vg.groups.push({
         id: `vg-${Date.now()}`,
-        x, y, w, h, title,
+        x: gx - 200, y: gy - 100, w: 400, h: 300, title,
         color: VG_COLORS[_vg.groups.length % VG_COLORS.length],
     });
     saveVGGroups();
